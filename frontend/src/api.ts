@@ -1,6 +1,19 @@
 import type { CourseImportResponse, ExplainMoveResponse, ManualMoveResponse, ScheduleProject, ValidationIssue } from "./types";
 
-const API_BASE = (import.meta.env.VITE_API_BASE ?? "http://localhost:8000/api").replace(/\/$/, "");
+function resolveApiBase(): string {
+  const configuredBase = import.meta.env.VITE_API_BASE?.trim();
+  if (configuredBase) {
+    return configuredBase.replace(/\/$/, "");
+  }
+
+  if (import.meta.env.DEV) {
+    return "http://localhost:8000/api";
+  }
+
+  throw new Error("Missing VITE_API_BASE for production build.");
+}
+
+const API_BASE = resolveApiBase();
 
 export async function validateProject(project: ScheduleProject): Promise<ScheduleProject> {
   const response = await fetch(`${API_BASE}/projects/validate`, {
