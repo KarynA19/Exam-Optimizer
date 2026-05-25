@@ -19,7 +19,7 @@ def solve_schedule_project(request: SolveRequest) -> dict:
     issues = validate_project(request.project)
     blocking_issues = [issue for issue in issues if issue.severity == "error"]
     if blocking_issues:
-        raise HTTPException(status_code=422, detail=[issue.model_dump() for issue in blocking_issues])
+        raise HTTPException(status_code=422, detail=[issue.model_dump(mode="json") for issue in blocking_issues])
     return solve_project(request)
 
 

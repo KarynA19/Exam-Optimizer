@@ -1,3 +1,6 @@
+from fastapi import HTTPException
+
+from app.api.routes.projects import solve_schedule_project
 from app.models.schedule import ConstraintConfig, CourseInput, DateRange, ExcludedDateRange, FixedExam, ScheduleProject, ScheduledExam, SolveRequest
 from app.services.solver import solve_project
 from app.models.schedule import ManualMoveRequest
@@ -42,6 +45,32 @@ def test_solve_project_reports_no_feasible_schedule_when_constraints_conflict() 
 
     assert result["solutions"] == []
     assert any(issue["code"] == "no_feasible_schedule" for issue in result["issues"])
+
+
+def test_solve_schedule_project_serializes_blocking_issue_dates() -> None:
+    project = ScheduleProject(
+        project_name="Invalid excluded date",
+        moed_a_window=DateRange(start_date="2026-06-01", end_date="2026-06-10"),
+        excluded_ranges=[
+            ExcludedDateRange(start_date="2026-05-19", end_date="2026-05-19", reason="Outside window"),
+        ],
+    )
+
+    try:
+        solve_schedule_project(SolveRequest(project=project, max_solutions=1))
+    except HTTPException as error:
+        assert error.status_code == 422
+        assert error.detail == [
+            {
+                "code": "excluded_outside_window",
+                "severity": "error",
+                "message": "Excluded dates must stay inside the Moed A window.",
+                "related_course_code": None,
+                "related_date": "2026-05-19",
+            }
+        ]
+    else:
+        raise AssertionError("Expected solve_schedule_project to reject excluded dates outside the window.")
 
 
 def test_validate_project_rejects_fixed_exam_on_excluded_date() -> None:

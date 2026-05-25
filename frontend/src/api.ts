@@ -1,6 +1,6 @@
 import type { CourseImportResponse, ExplainMoveResponse, ManualMoveResponse, ScheduleProject, ValidationIssue } from "./types";
 
-const API_BASE = "http://localhost:8000/api";
+const API_BASE = (import.meta.env.VITE_API_BASE ?? "http://localhost:8000/api").replace(/\/$/, "");
 
 export async function validateProject(project: ScheduleProject): Promise<ScheduleProject> {
   const response = await fetch(`${API_BASE}/projects/validate`, {
