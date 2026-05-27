@@ -1,13 +1,21 @@
 import type { ScheduleProject, ScheduleSolution } from "../types";
 import { diffDays, isWeekend, toDate } from "./dateHelpers";
 
+function formatDateKey(date: Date) {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+
+  return `${year}-${month}-${day}`;
+}
+
 export function buildCalendarDays(project: ScheduleProject) {
   const days: string[] = [];
   const cursor = toDate(project.moed_a_window.start_date);
   const endDate = toDate(project.moed_a_window.end_date);
 
   while (cursor <= endDate) {
-    days.push(cursor.toISOString().slice(0, 10));
+    days.push(formatDateKey(cursor));
     cursor.setDate(cursor.getDate() + 1);
   }
 

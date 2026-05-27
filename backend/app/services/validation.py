@@ -5,15 +5,32 @@ from datetime import date, timedelta
 from app.models.schedule import CourseInput, ManualMoveRequest, ScheduleProject, ScheduledExam, ScheduleSolution, ValidationIssue
 
 
+FRIDAY_EXAM_PENALTY = 100
+SAME_SEMESTER_GAP_WEIGHT = 10
+ADJACENT_SEMESTER_SAME_DAY_PENALTY = 5
+
+
 def date_is_excluded(project: ScheduleProject, target_date: date) -> bool:
     return any(excluded_range.start_date <= target_date <= excluded_range.end_date for excluded_range in project.excluded_ranges)
+
+
+def date_is_saturday(target_date: date) -> bool:
+    return target_date.weekday() == 5
+
+
+def date_is_friday(target_date: date) -> bool:
+    return target_date.weekday() == 4
+
+
+def date_is_schedulable(project: ScheduleProject, target_date: date) -> bool:
+    return not date_is_excluded(project, target_date) and not date_is_saturday(target_date)
 
 
 def iter_allowed_dates(project: ScheduleProject) -> list[date]:
     allowed_dates: list[date] = []
     current_date = project.moed_a_window.start_date
     while current_date <= project.moed_a_window.end_date:
-        if not date_is_excluded(project, current_date):
+        if date_is_schedulable(project, current_date):
             allowed_dates.append(current_date)
         current_date += timedelta(days=1)
     return allowed_dates
@@ -29,8 +46,8 @@ def pair_requires_same_semester_gap(first_course: CourseInput, second_course: Co
 
 def pair_requires_prerequisite_gap(first_course: CourseInput, second_course: CourseInput) -> bool:
     prerequisite_pair = (
-        first_course.prerequisite_course_code == second_course.course_code
-        or second_course.prerequisite_course_code == first_course.course_code
+        second_course.course_code in first_course.prerequisite_course_codes
+        or first_course.course_code in second_course.prerequisite_course_codes
     )
     back_to_back_semesters = abs(first_course.semester_number - second_course.semester_number) == 1
     return prerequisite_pair and back_to_back_semesters
@@ -46,11 +63,17 @@ def pair_prefers_adjacent_semester_spacing(first_course: CourseInput, second_cou
     return abs(first_course.semester_number - second_course.semester_number) == 1
 
 
+def pair_requires_adjacent_semester_gap(first_course: CourseInput, second_course: CourseInput) -> bool:
+    return pair_prefers_adjacent_semester_spacing(first_course, second_course)
+
+
 def pair_required_gap_days(project: ScheduleProject, first_course: CourseInput, second_course: CourseInput) -> int:
     min_gap = 0
 
     if pair_requires_same_semester_gap(first_course, second_course):
         min_gap = max(min_gap, project.constraint_config.same_semester_gap_days)
+    if pair_requires_adjacent_semester_gap(first_course, second_course):
+        min_gap = max(min_gap, project.constraint_config.adjacent_semester_gap_days)
     if pair_requires_prerequisite_gap(first_course, second_course):
         min_gap = max(min_gap, project.constraint_config.prerequisite_gap_days)
     if pair_requires_high_failure_gap(first_course, second_course):
@@ -62,6 +85,10 @@ def pair_required_gap_days(project: ScheduleProject, first_course: CourseInput, 
 def score_solution(project: ScheduleProject, exams: list[ScheduledExam]) -> int:
     course_lookup = {course.course_code: course for course in project.courses}
     total_score = 0
+
+    for exam in exams:
+        if date_is_friday(exam.exam_date):
+            total_score -= FRIDAY_EXAM_PENALTY
 
     for index, exam in enumerate(exams):
         course = course_lookup.get(exam.course_code)
@@ -75,14 +102,14 @@ def score_solution(project: ScheduleProject, exams: list[ScheduledExam]) -> int:
 
             distance = gap_days(exam.exam_date, other_exam.exam_date)
             if pair_requires_same_semester_gap(course, other_course):
-                total_score += distance * project.constraint_config.same_semester_gap_days
+                total_score += distance * project.constraint_config.same_semester_gap_days * SAME_SEMESTER_GAP_WEIGHT
             elif pair_requires_prerequisite_gap(course, other_course):
                 total_score += distance * project.constraint_config.prerequisite_gap_days
             elif pair_requires_high_failure_gap(course, other_course):
                 total_score += distance * (project.constraint_config.high_failure_gap_days + 1)
 
             if pair_prefers_adjacent_semester_spacing(course, other_course) and distance == 0:
-                total_score -= 1
+                total_score -= ADJACENT_SEMESTER_SAME_DAY_PENALTY
 
     return total_score
 
@@ -97,6 +124,7 @@ def pair_constraint_issues(
     issues: list[ValidationIssue] = []
     distance = gap_days(moved_date, other_date)
     same_semester_gap = project.constraint_config.same_semester_gap_days
+    adjacent_semester_gap = project.constraint_config.adjacent_semester_gap_days
     prerequisite_gap = project.constraint_config.prerequisite_gap_days
     high_failure_gap = project.constraint_config.high_failure_gap_days
 
@@ -106,6 +134,19 @@ def pair_constraint_issues(
                 code="unsatisfied_constraint",
                 severity="error",
                 message=f"Courses in the same semester need at least a {same_semester_gap}-day gap.",
+                related_course_code=other_course.course_code,
+                related_date=other_date,
+            )
+        )
+
+    if pair_requires_adjacent_semester_gap(moved_course, other_course) and distance < adjacent_semester_gap:
+        issues.append(
+            ValidationIssue(
+                code="unsatisfied_constraint",
+                severity="error",
+                message=(
+                    f"Courses in back-to-back semesters need at least a {adjacent_semester_gap}-day gap."
+                ),
                 related_course_code=other_course.course_code,
                 related_date=other_date,
             )
@@ -158,6 +199,17 @@ def validate_solution_exams(project: ScheduleProject, exams: list[ScheduledExam]
                     code="unsatisfied_constraint",
                     severity="error",
                     message="Scheduled exams cannot use excluded dates.",
+                    related_course_code=exam.course_code,
+                    related_date=exam.exam_date,
+                )
+            )
+
+        if date_is_saturday(exam.exam_date):
+            issues.append(
+                ValidationIssue(
+                    code="unsatisfied_constraint",
+                    severity="error",
+                    message="Scheduled exams cannot be placed on Saturdays.",
                     related_course_code=exam.course_code,
                     related_date=exam.exam_date,
                 )
@@ -236,6 +288,33 @@ def validate_project(project: ScheduleProject) -> list[ValidationIssue]:
                     related_date=fixed_exam.exam_date,
                 )
             )
+        if date_is_saturday(fixed_exam.exam_date):
+            issues.append(
+                ValidationIssue(
+                    code="unsatisfied_constraint",
+                    severity="error",
+                    message="Fixed exams cannot be placed on Saturdays.",
+                    related_course_code=fixed_exam.course_code,
+                    related_date=fixed_exam.exam_date,
+                )
+            )
+        missing_prerequisite_codes = [
+            prerequisite_code
+            for prerequisite_code in fixed_exam.prerequisite_course_codes
+            if prerequisite_code not in course_lookup
+        ]
+        if missing_prerequisite_codes:
+            issues.append(
+                ValidationIssue(
+                    code="missing_prerequisite_target",
+                    severity="error",
+                    message=(
+                        "Fixed exam prerequisite course codes must match other courses in the project: "
+                        f"{', '.join(missing_prerequisite_codes)}."
+                    ),
+                    related_course_code=fixed_exam.course_code,
+                )
+            )
 
     for course in project.courses:
         if course.course_code in seen_course_codes:
@@ -249,13 +328,18 @@ def validate_project(project: ScheduleProject) -> list[ValidationIssue]:
             )
         seen_course_codes.add(course.course_code)
 
-        prerequisite_code = course.prerequisite_course_code
-        if prerequisite_code and prerequisite_code not in course_lookup:
+        missing_prerequisite_codes = [
+            prerequisite_code for prerequisite_code in course.prerequisite_course_codes if prerequisite_code not in course_lookup
+        ]
+        if missing_prerequisite_codes:
             issues.append(
                 ValidationIssue(
                     code="missing_prerequisite_target",
                     severity="error",
-                    message="Prerequisite course code must match another course in the project.",
+                    message=(
+                        "Prerequisite course codes must match other courses in the project: "
+                        f"{', '.join(missing_prerequisite_codes)}."
+                    ),
                     related_course_code=course.course_code,
                 )
             )

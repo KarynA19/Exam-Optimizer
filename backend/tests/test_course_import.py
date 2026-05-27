@@ -30,7 +30,21 @@ def test_import_courses_from_excel_parses_valid_template() -> None:
     assert result.imported_count == 2
     assert result.courses[0].course_code == "ALG1"
     assert result.courses[0].high_failure_rate is True
-    assert result.courses[1].prerequisite_course_code == "ALG1"
+    assert result.courses[1].prerequisite_course_codes == ["ALG1"]
+
+
+def test_import_courses_from_excel_parses_multiple_prerequisites() -> None:
+    content = build_workbook_bytes(
+        [
+            ["ALG1", "Algebra 1", 1, "yes", ""],
+            ["CALC1", "Calculus 1", 2, "no", ""],
+            ["ALG3", "Advanced Algebra", 3, "no", "ALG1, CALC1"],
+        ]
+    )
+
+    result = import_courses_from_excel(content)
+
+    assert result.courses[2].prerequisite_course_codes == ["ALG1", "CALC1"]
 
 
 def test_import_courses_from_excel_rejects_invalid_headers() -> None:
@@ -39,7 +53,7 @@ def test_import_courses_from_excel_rejects_invalid_headers() -> None:
     try:
         import_courses_from_excel(content)
     except CourseImportError as error:
-        assert any("Template headers must be" in issue.message for issue in error.issues)
+        assert any("Column A should be 'Course ID'" in issue.message for issue in error.issues)
     else:
         raise AssertionError("Expected CourseImportError for invalid headers.")
 
@@ -61,7 +75,7 @@ def test_import_courses_from_excel_rejects_missing_prerequisite_target() -> None
     try:
         import_courses_from_excel(content)
     except CourseImportError as error:
-        assert any(issue.code == "missing_prerequisite_target" for issue in error.issues)
+        assert any("Row 2: Prerequisites references 'ALG1'" in issue.message for issue in error.issues)
     else:
         raise AssertionError("Expected CourseImportError for missing prerequisite target.")
 
@@ -77,7 +91,7 @@ def test_import_courses_from_excel_rejects_duplicate_course_codes() -> None:
     try:
         import_courses_from_excel(content)
     except CourseImportError as error:
-        assert any(issue.code == "duplicate_course_code" for issue in error.issues)
+        assert any("Row 2: Course ID 'ALG1' appears more than once" in issue.message for issue in error.issues)
     else:
         raise AssertionError("Expected CourseImportError for duplicate course codes.")
 

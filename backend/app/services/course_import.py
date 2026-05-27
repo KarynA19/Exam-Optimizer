@@ -17,6 +17,14 @@ EXPECTED_HEADERS = [
     "prerequisites",
 ]
 
+DISPLAY_HEADERS = [
+    "Course ID",
+    "Course Name",
+    "Semester",
+    "Is High Failure",
+    "Prerequisites",
+]
+
 TRUTHY_VALUES = {"1", "true", "yes", "y"}
 FALSY_VALUES = {"0", "false", "no", "n", ""}
 
@@ -43,6 +51,90 @@ def _build_issue(message: str, row_number: int | None = None, course_code: str |
         message=f"{row_prefix}{message}",
         related_course_code=course_code or None,
     )
+
+
+def _build_header_issue(actual_headers: list[str], actual_header_labels: list[str]) -> ValidationIssue:
+    mismatches: list[str] = []
+    for index, (expected, actual) in enumerate(zip(EXPECTED_HEADERS, actual_headers, strict=False), start=1):
+        if expected == actual:
+            continue
+        column_name = chr(64 + index)
+        actual_label = actual_header_labels[index - 1] or "blank"
+        mismatches.append(f"Column {column_name} should be '{DISPLAY_HEADERS[index - 1]}' but is '{actual_label}'")
+
+    if not mismatches:
+        mismatches.append("the first row does not match the expected template")
+
+    expected_order = ", ".join(f"{chr(65 + index)}: {header}" for index, header in enumerate(DISPLAY_HEADERS))
+    return _build_issue(f"Template headers must match exactly. Expected {expected_order}. Mismatch: {'; '.join(mismatches)}.")
+
+
+def _build_duplicate_course_issues(row_numbers_by_code: dict[str, list[int]]) -> list[ValidationIssue]:
+    issues: list[ValidationIssue] = []
+    for course_code, row_numbers in row_numbers_by_code.items():
+        if len(row_numbers) < 2:
+            continue
+        joined_rows = ", ".join(str(row_number) for row_number in row_numbers)
+        for row_number in row_numbers:
+            issues.append(
+                ValidationIssue(
+                    code="duplicate_course_code",
+                    severity="error",
+                    message=f"Row {row_number}: Course ID '{course_code}' appears more than once in the file (rows {joined_rows}).",
+                    related_course_code=course_code,
+                )
+            )
+    return issues
+
+
+def _build_missing_prerequisite_issues(courses: list[CourseInput], row_numbers_by_code: dict[str, list[int]]) -> list[ValidationIssue]:
+    issues: list[ValidationIssue] = []
+    available_codes = set(row_numbers_by_code)
+    for course in courses:
+        missing_codes = [
+            prerequisite_code for prerequisite_code in course.prerequisite_course_codes if prerequisite_code not in available_codes
+        ]
+        if not missing_codes:
+            continue
+
+        row_number = row_numbers_by_code.get(course.course_code, [None])[0]
+        issues.append(
+            ValidationIssue(
+                code="missing_prerequisite_target",
+                severity="error",
+                message=(
+                    f"Row {row_number}: Prerequisites references {', '.join(repr(code) for code in missing_codes)}, "
+                    "but those Course ID values do not exist in this file."
+                )
+                if row_number is not None
+                else (
+                    f"Prerequisites references {', '.join(repr(code) for code in missing_codes)}, "
+                    "but those Course ID values do not exist in this file."
+                ),
+                related_course_code=course.course_code,
+            )
+        )
+    return issues
+
+
+def _contextualize_validation_issues(
+    issues: list[ValidationIssue],
+    row_numbers_by_code: dict[str, list[int]],
+) -> list[ValidationIssue]:
+    contextualized: list[ValidationIssue] = []
+    for issue in issues:
+        row_number = row_numbers_by_code.get(issue.related_course_code or "", [None])[0]
+        if row_number is None:
+            contextualized.append(issue)
+            continue
+        contextualized.append(
+            issue.model_copy(
+                update={
+                    "message": f"Row {row_number}: {issue.message}",
+                }
+            )
+        )
+    return contextualized
 
 
 def _parse_semester(value: object) -> int:
@@ -87,19 +179,15 @@ def import_courses_from_excel(content: bytes) -> CourseImportResponse:
         raise CourseImportError([_build_issue("Uploaded file is not a valid .xlsx workbook.")]) from error
 
     worksheet = workbook.worksheets[0]
-    actual_headers = [_normalize_header(worksheet.cell(row=1, column=column).value) for column in range(1, 6)]
+    actual_header_labels = [_cell_text(worksheet.cell(row=1, column=column).value) for column in range(1, 6)]
+    actual_headers = [_normalize_header(header) for header in actual_header_labels]
 
     if actual_headers != EXPECTED_HEADERS:
-        raise CourseImportError(
-            [
-                _build_issue(
-                    "Template headers must be A: Course ID, B: Course Name, C: Semester, D: Is High Failure, E: Prerequisites.",
-                )
-            ]
-        )
+        raise CourseImportError([_build_header_issue(actual_headers, actual_header_labels)])
 
     issues: list[ValidationIssue] = []
     courses: list[CourseInput] = []
+    row_numbers_by_code: dict[str, list[int]] = {}
 
     for row_number in range(2, worksheet.max_row + 1):
         raw_values = [worksheet.cell(row=row_number, column=column).value for column in range(1, 6)]
@@ -108,7 +196,7 @@ def import_courses_from_excel(content: bytes) -> CourseImportResponse:
 
         course_code = _cell_text(raw_values[0])
         course_name = _cell_text(raw_values[1])
-        prerequisite_code = _cell_text(raw_values[4]) or None
+        prerequisite_codes = _cell_text(raw_values[4])
 
         try:
             semester_number = _parse_semester(raw_values[2])
@@ -119,9 +207,10 @@ def import_courses_from_excel(content: bytes) -> CourseImportResponse:
                     course_name=course_name,
                     semester_number=semester_number,
                     high_failure_rate=high_failure_rate,
-                    prerequisite_course_code=prerequisite_code,
+                    prerequisite_course_codes=prerequisite_codes,
                 )
             )
+            row_numbers_by_code.setdefault(course_code, []).append(row_number)
         except ValueError as error:
             issues.append(_build_issue(str(error), row_number=row_number, course_code=course_code or None))
         except ValidationError as error:
@@ -130,6 +219,9 @@ def import_courses_from_excel(content: bytes) -> CourseImportResponse:
 
     if not courses and not issues:
         issues.append(_build_issue("The workbook does not contain any course rows."))
+
+    issues.extend(_build_duplicate_course_issues(row_numbers_by_code))
+    issues.extend(_build_missing_prerequisite_issues(courses, row_numbers_by_code))
 
     if issues:
         raise CourseImportError(issues)
@@ -142,6 +234,6 @@ def import_courses_from_excel(content: bytes) -> CourseImportResponse:
     validation_issues = validate_project(validation_project)
 
     if validation_issues:
-        raise CourseImportError(validation_issues)
+        raise CourseImportError(_contextualize_validation_issues(validation_issues, row_numbers_by_code))
 
     return CourseImportResponse(imported_count=len(courses), courses=courses)

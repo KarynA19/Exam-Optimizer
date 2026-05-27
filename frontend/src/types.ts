@@ -19,6 +19,8 @@ export type ExcludedDateRange = DateRange & {
 
 export type FixedExam = {
   course_code: string;
+  course_name: string;
+  prerequisite_course_codes: string[];
   exam_date: string;
   locked: boolean;
   reason?: string | null;
@@ -29,7 +31,7 @@ export type CourseInput = {
   course_name: string;
   semester_number: number;
   high_failure_rate: boolean;
-  prerequisite_course_code?: string | null;
+  prerequisite_course_codes: string[];
 };
 
 export type ScheduledExam = {
@@ -40,9 +42,21 @@ export type ScheduledExam = {
 
 export type ConstraintConfig = {
   same_semester_gap_days: number;
+  adjacent_semester_gap_days: number;
   prerequisite_gap_days: number;
   high_failure_gap_days: number;
 };
+
+export type SavedSetupEntry = {
+  entry_id: string;
+  year: number;
+  project_name: string;
+  moed_a_window: DateRange;
+  constraint_config: ConstraintConfig;
+  saved_at: string;
+};
+
+export type SavedSetupLibrary = Record<string, SavedSetupEntry[]>;
 
 export type ScheduleSolution = {
   solution_id: string;
@@ -76,6 +90,8 @@ export type ScheduleProject = {
   project_name: string;
   moed_a_window: DateRange;
   constraint_config: ConstraintConfig;
+  setup_entry_id?: string | null;
+  initial_setup_saved_at?: string | null;
   excluded_ranges: ExcludedDateRange[];
   fixed_exams: FixedExam[];
   courses: CourseInput[];
@@ -91,9 +107,12 @@ export const createEmptyProject = (): ScheduleProject => ({
   },
   constraint_config: {
     same_semester_gap_days: 3,
+    adjacent_semester_gap_days: 2,
     prerequisite_gap_days: 3,
     high_failure_gap_days: 3,
   },
+  setup_entry_id: null,
+  initial_setup_saved_at: null,
   excluded_ranges: [],
   fixed_exams: [],
   courses: [],

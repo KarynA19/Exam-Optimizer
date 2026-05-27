@@ -21,7 +21,10 @@ export function buildDependencyEdges(project: ScheduleProject) {
     const course = project.courses[index];
 
     for (const otherCourse of project.courses.slice(index + 1)) {
-      if (course.prerequisite_course_code === otherCourse.course_code || otherCourse.prerequisite_course_code === course.course_code) {
+      if (
+        course.prerequisite_course_codes.includes(otherCourse.course_code) ||
+        otherCourse.prerequisite_course_codes.includes(course.course_code)
+      ) {
         edges.push({ from: course.course_code, to: otherCourse.course_code, type: "prerequisite" });
         continue;
       }

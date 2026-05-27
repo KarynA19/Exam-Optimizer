@@ -3,7 +3,6 @@ import { useEffect, useRef, useState } from "react";
 import { explainMoveProject, importCoursesSpreadsheet, manualMoveProject, solveProject, validateProject } from "./api";
 import { EditableSimpleList } from "./components/common/EditableSimpleList";
 import { IssueList } from "./components/common/IssueList";
-import { Metric } from "./components/common/Metric";
 import { SectionTitle } from "./components/common/SectionTitle";
 import { CourseForm } from "./components/forms/CourseForm";
 import { ExcludedRangeForm } from "./components/forms/ExcludedRangeForm";
@@ -13,12 +12,15 @@ import { ConflictDrawer } from "./components/workspace/ConflictDrawer";
 import { DependencyGraph } from "./components/workspace/DependencyGraph";
 import { MasterCalendar } from "./components/workspace/MasterCalendar";
 import { SolutionCard } from "./components/workspace/SolutionCard";
-import { loadProject, saveProject } from "./storage/localProject";
+import { deleteSetupEntry, loadProject, loadSetupLibrary, saveProject, upsertSetupEntry } from "./storage/localProject";
+import { createEmptyProject } from "./types";
 import type {
   CourseInput,
   CourseImportResponse,
   ExcludedDateRange,
   FixedExam,
+  SavedSetupEntry,
+  SavedSetupLibrary,
   ScheduleProject,
   ScheduleSolution,
   ScheduledExam,
@@ -33,12 +35,24 @@ import {
 } from "./utils/workspaceUtils";
 
 type SetupStep = "project" | "excluded" | "fixed" | "courses";
+type AppRoute = "/setup" | "/schedule";
+
+function readRouteFromLocation(): { route: AppRoute; section: SetupStep | null } {
+  const route: AppRoute = window.location.pathname === "/schedule" ? "/schedule" : "/setup";
+  const hash = window.location.hash.replace("#", "");
+  const section = ["project", "excluded", "fixed", "courses"].includes(hash) ? (hash as SetupStep) : null;
+  return { route, section };
+}
+
+function getConflictKey(issue: ValidationIssue): string {
+  return [issue.code, issue.related_course_code ?? "", issue.related_date ?? "", issue.message].join("|");
+}
 
 const SETUP_STEPS: Array<{ id: SetupStep; title: string; subtitle: string }> = [
   {
     id: "project",
-    title: "Project Setup",
-    subtitle: "Define the Moed A window and draft metadata.",
+    title: "Initial Setup",
+    subtitle: "Define the Moed A window, project name, and scheduling gaps.",
   },
   {
     id: "excluded",
@@ -58,7 +72,9 @@ const SETUP_STEPS: Array<{ id: SetupStep; title: string; subtitle: string }> = [
 ];
 
 function App() {
+  const initialLocation = readRouteFromLocation();
   const [project, setProject] = useState<ScheduleProject>(() => loadProject());
+  const [setupLibrary, setSetupLibrary] = useState<SavedSetupLibrary>(() => loadSetupLibrary());
   const [status, setStatus] = useState<string>("Draft saved locally.");
   const [busyAction, setBusyAction] = useState<"validate" | "solve" | "manual-move" | "import-courses" | null>(null);
   const [editingExcludedIndex, setEditingExcludedIndex] = useState<number | null>(null);
@@ -75,10 +91,15 @@ function App() {
   const [showChanges, setShowChanges] = useState(false);
   const [graphFocusCourseCode, setGraphFocusCourseCode] = useState<string | null>(null);
   const [activeWorkspaceTab, setActiveWorkspaceTab] = useState<"calendar" | "compare" | "graph">("calendar");
-  const [activeSetupStep, setActiveSetupStep] = useState<SetupStep>("project");
+  const [activeRoute, setActiveRoute] = useState<AppRoute>(initialLocation.route);
+  const [activeSetupSection, setActiveSetupSection] = useState<SetupStep | null>(initialLocation.section);
+  const [setupExpanded, setSetupExpanded] = useState<boolean>(initialLocation.route === "/setup");
+  const [collapsedSetupYears, setCollapsedSetupYears] = useState<Record<string, boolean>>({});
   const [selectedCourseFileName, setSelectedCourseFileName] = useState<string>("");
   const [coursesListCollapsed, setCoursesListCollapsed] = useState(false);
+  const [selectedConflictKey, setSelectedConflictKey] = useState<string | null>(null);
   const courseImportInputRef = useRef<HTMLInputElement | null>(null);
+  const setupSectionRefs = useRef<Partial<Record<SetupStep, HTMLElement | null>>>({});
 
   const courseNameByCode = Object.fromEntries(project.courses.map((course) => [course.course_code, course.course_name]));
   const courseByCode = Object.fromEntries(project.courses.map((course) => [course.course_code, course]));
@@ -91,10 +112,43 @@ function App() {
     : null;
   const selectedCourse = selectedExam ? courseByCode[selectedExam.course_code] : null;
   const dependencyEdges = buildDependencyEdges(project);
-  const activeSetupStepIndex = SETUP_STEPS.findIndex((step) => step.id === activeSetupStep);
-  const currentSetupStep = SETUP_STEPS[activeSetupStepIndex] ?? SETUP_STEPS[0];
-  const previousSetupStep = activeSetupStepIndex > 0 ? SETUP_STEPS[activeSetupStepIndex - 1] : null;
-  const nextSetupStep = activeSetupStepIndex < SETUP_STEPS.length - 1 ? SETUP_STEPS[activeSetupStepIndex + 1] : null;
+  const allSavedSetups = Object.values(setupLibrary).flat();
+  const currentSavedSetup = project.setup_entry_id
+    ? allSavedSetups.find((entry) => entry.entry_id === project.setup_entry_id) ?? null
+    : null;
+  const hasInitialSetup = Boolean(project.setup_entry_id);
+  const sortedSetupYears = Object.keys(setupLibrary).sort((left, right) => Number(right) - Number(left));
+  const [isEditingInitialSetup, setIsEditingInitialSetup] = useState<boolean>(() => !project.setup_entry_id);
+
+  useEffect(() => {
+    if (window.location.pathname === "/") {
+      window.history.replaceState({}, "", "/setup");
+      setActiveRoute("/setup");
+    }
+
+    const handlePopState = () => {
+      const nextLocation = readRouteFromLocation();
+      setActiveRoute(nextLocation.route);
+      setActiveSetupSection(nextLocation.section);
+      setSetupExpanded(nextLocation.route === "/setup");
+    };
+
+    window.addEventListener("popstate", handlePopState);
+    return () => window.removeEventListener("popstate", handlePopState);
+  }, []);
+
+  useEffect(() => {
+    if (activeRoute !== "/setup") {
+      return;
+    }
+
+    if (activeSetupSection) {
+      setupSectionRefs.current[activeSetupSection]?.scrollIntoView({ behavior: "smooth", block: "start" });
+      return;
+    }
+
+    window.scrollTo({ top: 0, behavior: "smooth" });
+  }, [activeRoute, activeSetupSection]);
 
   useEffect(() => {
     saveProject(project);
@@ -115,8 +169,12 @@ function App() {
 
   useEffect(() => {
     setPreviewResponses({});
-    setSelectedPreviewDate(null);
   }, [selectedSolutionId, selectedExamKey, project.solutions]);
+
+  useEffect(() => {
+    setSelectedPreviewDate(null);
+    setSelectedConflictKey(null);
+  }, [selectedSolutionId, project.solutions]);
 
   useEffect(() => {
     if (!activeSolution || !selectedExam) {
@@ -159,11 +217,102 @@ function App() {
     setStatus("Draft updated locally.");
   }
 
-  function changeSetupStep(step: SetupStep) {
+  function buildSavedSetupEntry(): SavedSetupEntry {
+    const startYear = Number(project.moed_a_window.start_date.slice(0, 4));
+    const savedAt = new Date().toISOString();
+
+    return {
+      entry_id: project.setup_entry_id ?? `setup-${savedAt}`,
+      year: Number.isFinite(startYear) ? startYear : new Date().getFullYear(),
+      project_name: project.project_name,
+      moed_a_window: { ...project.moed_a_window },
+      constraint_config: { ...project.constraint_config },
+      saved_at: savedAt,
+    };
+  }
+
+  function handleSaveInitialSetup() {
+    const savedEntry = buildSavedSetupEntry();
+    const nextLibrary = upsertSetupEntry(savedEntry);
+
+    setSetupLibrary(nextLibrary);
+    setProject((current) => ({
+      ...current,
+      setup_entry_id: savedEntry.entry_id,
+      initial_setup_saved_at: savedEntry.saved_at,
+      solutions: [],
+      issues: [],
+    }));
+    setIsEditingInitialSetup(false);
+    setStatus(`Saved initial setup under ${savedEntry.year}.`);
+  }
+
+  function handleUseSavedSetup(entry: SavedSetupEntry) {
+    const emptyProject = createEmptyProject();
+
+    setProject({
+      ...emptyProject,
+      project_name: entry.project_name,
+      moed_a_window: { ...entry.moed_a_window },
+      constraint_config: { ...entry.constraint_config },
+      setup_entry_id: entry.entry_id,
+      initial_setup_saved_at: entry.saved_at,
+    });
     setEditingExcludedIndex(null);
     setEditingFixedExamIndex(null);
     setEditingCourseIndex(null);
-    setActiveSetupStep(step);
+    setSelectedSolutionId(null);
+    setSelectedExamKey(null);
+    setSelectedPreviewDate(null);
+    setGraphFocusCourseCode(null);
+    setCourseImportIssues([]);
+    setIsEditingInitialSetup(false);
+    navigateTo("/setup", "project");
+    setStatus(`Loaded saved setup from ${entry.year}.`);
+  }
+
+  function handleDeleteSavedSetup(entry: SavedSetupEntry) {
+    const nextLibrary = deleteSetupEntry(entry.entry_id);
+    setSetupLibrary(nextLibrary);
+
+    if (project.setup_entry_id === entry.entry_id) {
+      setProject((current) => ({
+        ...current,
+        setup_entry_id: null,
+        initial_setup_saved_at: null,
+        solutions: [],
+        issues: [],
+      }));
+      setIsEditingInitialSetup(true);
+      navigateTo("/setup", "project");
+      setStatus(`Deleted saved setup ${entry.project_name}. The current entry is now unsaved.`);
+      return;
+    }
+
+    setStatus(`Deleted saved setup ${entry.project_name}.`);
+  }
+
+  function navigateTo(route: AppRoute, section?: SetupStep | null) {
+    const nextUrl = route === "/setup" && section ? `${route}#${section}` : route;
+    if (`${window.location.pathname}${window.location.hash}` !== nextUrl) {
+      window.history.pushState({}, "", nextUrl);
+    }
+
+    setActiveRoute(route);
+    setActiveSetupSection(route === "/setup" ? (section ?? null) : null);
+    setSetupExpanded(route === "/setup");
+  }
+
+  function formatFixedExamItem(exam: FixedExam): string {
+    const prerequisiteText = exam.prerequisite_course_codes.length > 0 ? exam.prerequisite_course_codes.join(", ") : "None";
+
+    return `${exam.course_code} - ${exam.course_name} - Prerequisites: ${prerequisiteText} - ${exam.exam_date}`;
+  }
+
+  function resetSetupEditors() {
+    setEditingExcludedIndex(null);
+    setEditingFixedExamIndex(null);
+    setEditingCourseIndex(null);
   }
 
   function saveExcludedRange(range: ExcludedDateRange) {
@@ -215,12 +364,35 @@ function App() {
     setEditingCourseIndex(null);
   }
 
+  function summarizeCourseImportIssues(issues: ValidationIssue[]): string {
+    const [firstIssue] = issues;
+    if (!firstIssue) {
+      return "Course import failed.";
+    }
+
+    return issues.length === 1
+      ? `Course import failed: ${firstIssue.message}`
+      : `Course import failed: ${firstIssue.message} (${issues.length} issues found)`;
+  }
+
   function removeCourse(indexToRemove: number) {
     setCourseImportIssues([]);
     patchProject({
       courses: project.courses.filter((_, index) => index !== indexToRemove),
     });
     setEditingCourseIndex(null);
+  }
+
+  function resetCourseList() {
+    setCourseImportIssues([]);
+    setSelectedCourseFileName("");
+    patchProject({ courses: [] });
+    setEditingCourseIndex(null);
+    setSelectedSolutionId(null);
+    setSelectedExamKey(null);
+    setSelectedPreviewDate(null);
+    setGraphFocusCourseCode(null);
+    setStatus("Course list reset.");
   }
 
   async function handleCourseImport(file: File) {
@@ -233,17 +405,17 @@ function App() {
       const result: CourseImportResponse = await importCoursesSpreadsheet(file);
 
       patchProject({ courses: result.courses });
-      setEditingCourseIndex(null);
+      resetSetupEditors();
       setSelectedSolutionId(null);
       setSelectedExamKey(null);
       setSelectedPreviewDate(null);
       setGraphFocusCourseCode(null);
-      changeSetupStep("courses");
       setStatus(`Imported ${result.imported_count} courses from ${file.name}.`);
     } catch (error) {
       if (Array.isArray(error)) {
-        setCourseImportIssues(error as ValidationIssue[]);
-        setStatus("Excel import failed. Review the reported rows.");
+        const issues = error as ValidationIssue[];
+        setCourseImportIssues(issues);
+        setStatus(summarizeCourseImportIssues(issues));
       } else {
         setStatus(error instanceof Error ? error.message : "Course import failed.");
       }
@@ -257,7 +429,11 @@ function App() {
     setStatus("Checking project rules...");
     try {
       const validatedProject = await validateProject(project);
-      setProject(validatedProject);
+      setProject((current) => ({
+        ...validatedProject,
+        setup_entry_id: current.setup_entry_id,
+        initial_setup_saved_at: current.initial_setup_saved_at,
+      }));
       setStatus("Validation finished.");
     } catch (error) {
       setStatus(error instanceof Error ? error.message : "Validation failed.");
@@ -373,6 +549,7 @@ function App() {
       }),
     }));
     setSelectedPreviewDate(null);
+    setSelectedConflictKey(null);
     setStatus(`Reset ${solutionId} back to its original solver schedule.`);
   }
 
@@ -382,143 +559,268 @@ function App() {
   const previewStatus = activeSolution && selectedExam && selectedPreviewDate
     ? getPreviewStatus(activeSolution, selectedPreviewDate, selectedExam, previewResponse)
     : "idle";
+  const previewIssues = previewResponse?.issues ?? [];
+  const activeConflict = previewIssues.find((issue) => getConflictKey(issue) === selectedConflictKey) ?? previewIssues[0] ?? null;
+
+  useEffect(() => {
+    if (previewIssues.length === 0) {
+      setSelectedConflictKey(null);
+      return;
+    }
+
+    setSelectedConflictKey((current) => {
+      if (current && previewIssues.some((issue) => getConflictKey(issue) === current)) {
+        return current;
+      }
+
+      return getConflictKey(previewIssues[0]);
+    });
+  }, [previewIssues]);
+
+  function handleFocusConflict(issue: ValidationIssue) {
+    if (!activeSolution) {
+      return;
+    }
+
+    setSelectedConflictKey(getConflictKey(issue));
+
+    const targetCourseCode = issue.related_course_code ?? selectedExam?.course_code ?? null;
+    const targetExam = targetCourseCode
+      ? activeSolution.exams.find((exam) => exam.course_code === targetCourseCode) ?? null
+      : null;
+
+    if (targetExam) {
+      setSelectedExamKey(getExamMoveKey(activeSolution.solution_id, targetExam.course_code));
+      setSelectedPreviewDate(issue.related_date ?? targetExam.exam_date);
+      setGraphFocusCourseCode(targetExam.course_code);
+      return;
+    }
+
+    if (issue.related_date) {
+      setSelectedPreviewDate(issue.related_date);
+    }
+  }
 
   return (
     <div className="app-shell">
-      <aside className="hero-panel">
-        <p className="eyebrow">Exam Optimizer</p>
-        <h1>Build Moed A schedules around real academic rules.</h1>
-        <p className="hero-copy">
-          The master calendar is now the operational source of truth. Pick a solution, inspect dependency pressure, preview allowed move targets, and apply changes with validation guardrails.
-        </p>
-        <div className="status-card">
-          <span className="status-label">Workspace status</span>
-          <strong>{status}</strong>
+      <aside className="app-sidebar panel">
+        <div className="sidebar-branding">
+          <strong>Exam Optimizer</strong>
+          <span>Workspace navigation</span>
         </div>
-        <div className="stats-grid">
-          <Metric label="Courses" value={project.courses.length} />
-          <Metric label="Excluded ranges" value={project.excluded_ranges.length} />
-          <Metric label="Fixed exams" value={project.fixed_exams.length} />
-          <Metric label="Solutions" value={project.solutions.length} />
-        </div>
-      </aside>
 
-      <main className="workspace-grid">
-        <section className="panel panel-wide setup-panel">
-          <div className="setup-flow-header">
-            <SectionTitle title={currentSetupStep.title} subtitle={currentSetupStep.subtitle} />
-            <div className="setup-stepper" aria-label="Setup progress">
-              {SETUP_STEPS.map((step, index) => (
-                <button
-                  key={step.id}
-                  type="button"
-                  className={step.id === activeSetupStep ? "setup-step active" : "setup-step"}
-                  onClick={() => changeSetupStep(step.id)}
-                >
-                  <span className="setup-step-index">{index + 1}</span>
-                  <span className="setup-step-copy">
-                    <strong>{step.title}</strong>
-                    <small>{step.subtitle}</small>
-                  </span>
-                </button>
-              ))}
-            </div>
-          </div>
+        <nav className="sidebar-nav" aria-label="Primary navigation">
+          <div className="sidebar-group">
+            <button
+              type="button"
+              className={activeRoute === "/setup" ? "sidebar-link active" : "sidebar-link"}
+              onClick={() => {
+                setSetupExpanded(true);
+                navigateTo("/setup");
+              }}
+            >
+              <span>Setup</span>
+              <span className="sidebar-caret">{setupExpanded ? "-" : "+"}</span>
+            </button>
 
-          <div className="setup-step-panel">
-            {activeSetupStep === "project" ? (
-              <div className="setup-step-content">
-                <label>
-                  <span>Project name</span>
-                  <input
-                    value={project.project_name}
-                    onChange={(event) => patchProject({ project_name: event.target.value })}
-                  />
-                </label>
-                <div className="field-row">
-                  <label>
-                    <span>Start date</span>
-                    <input
-                      type="date"
-                      value={project.moed_a_window.start_date}
-                      onChange={(event) =>
-                        patchProject({
-                          moed_a_window: { ...project.moed_a_window, start_date: event.target.value },
-                        })
-                      }
-                    />
-                  </label>
-                  <label>
-                    <span>End date</span>
-                    <input
-                      type="date"
-                      value={project.moed_a_window.end_date}
-                      onChange={(event) =>
-                        patchProject({
-                          moed_a_window: { ...project.moed_a_window, end_date: event.target.value },
-                        })
-                      }
-                    />
-                  </label>
-                </div>
-                <div className="field-row field-row-triple">
-                  <label>
-                    <span>Same semester gap</span>
-                    <input
-                      type="number"
-                      min="1"
-                      max="30"
-                      value={project.constraint_config.same_semester_gap_days}
-                      onChange={(event) =>
-                        patchProject({
-                          constraint_config: {
-                            ...project.constraint_config,
-                            same_semester_gap_days: Number(event.target.value),
-                          },
-                        })
-                      }
-                    />
-                  </label>
-                  <label>
-                    <span>Prerequisite gap</span>
-                    <input
-                      type="number"
-                      min="1"
-                      max="30"
-                      value={project.constraint_config.prerequisite_gap_days}
-                      onChange={(event) =>
-                        patchProject({
-                          constraint_config: {
-                            ...project.constraint_config,
-                            prerequisite_gap_days: Number(event.target.value),
-                          },
-                        })
-                      }
-                    />
-                  </label>
-                  <label>
-                    <span>High-failure gap</span>
-                    <input
-                      type="number"
-                      min="1"
-                      max="30"
-                      value={project.constraint_config.high_failure_gap_days}
-                      onChange={(event) =>
-                        patchProject({
-                          constraint_config: {
-                            ...project.constraint_config,
-                            high_failure_gap_days: Number(event.target.value),
-                          },
-                        })
-                      }
-                    />
-                  </label>
-                </div>
+            {setupExpanded ? (
+              <div className="sidebar-sublinks">
+                {SETUP_STEPS.map((step) => (
+                  <button
+                    key={step.id}
+                    type="button"
+                    className={activeRoute === "/setup" && activeSetupSection === step.id ? "sidebar-sublink active" : "sidebar-sublink"}
+                    disabled={!hasInitialSetup && step.id !== "project"}
+                    onClick={() => navigateTo("/setup", step.id)}
+                  >
+                    {step.title}
+                  </button>
+                ))}
               </div>
             ) : null}
+          </div>
 
-            {activeSetupStep === "excluded" ? (
-              <div className="setup-step-content">
+          <button
+            type="button"
+            className={activeRoute === "/schedule" ? "sidebar-link active" : "sidebar-link"}
+            onClick={() => navigateTo("/schedule")}
+          >
+            <span>Schedule</span>
+          </button>
+        </nav>
+      </aside>
+
+      <main className="content-shell workspace-grid">
+        {activeRoute === "/setup" ? (
+          <div className="setup-route-layout route-panel">
+          <section className="panel setup-panel setup-main-panel">
+            <div className="setup-shell-header compact-shell-header">
+              <SectionTitle title="Setup" subtitle="Start with one saved initial setup entry. Once it is saved, keep the summary at the top and continue with excluded dates, fixed exams, and courses." />
+            </div>
+
+            <section
+              className="setup-step-panel setup-category-panel"
+              ref={(element) => {
+                setupSectionRefs.current.project = element;
+              }}
+            >
+              <SectionTitle title={SETUP_STEPS[0].title} subtitle={SETUP_STEPS[0].subtitle} />
+              <div className="setup-step-content compact-step-content">
+                {hasInitialSetup && !isEditingInitialSetup ? (
+                  <div className="saved-entry-summary">
+                    <div className="saved-entry-summary-header">
+                      <div>
+                        <strong>{project.project_name}</strong>
+                        <p className="field-hint">Saved under {currentSavedSetup?.year ?? project.moed_a_window.start_date.slice(0, 4)} and ready for the rest of setup.</p>
+                      </div>
+                      <div className="row-actions">
+                        <button type="button" className="secondary-button" onClick={() => setIsEditingInitialSetup(true)}>
+                          Edit entry
+                        </button>
+                        <button type="button" onClick={handleSaveInitialSetup}>
+                          Update saved setup
+                        </button>
+                      </div>
+                    </div>
+                    <div className="setup-summary-grid">
+                      <div>
+                        <span>Name</span>
+                        <strong>{project.project_name}</strong>
+                      </div>
+                      <div>
+                        <span>Window</span>
+                        <strong>{project.moed_a_window.start_date} to {project.moed_a_window.end_date}</strong>
+                      </div>
+                      <div>
+                        <span>Gaps</span>
+                        <strong>
+                          {project.constraint_config.same_semester_gap_days} / {project.constraint_config.prerequisite_gap_days} / {project.constraint_config.high_failure_gap_days} days
+                        </strong>
+                      </div>
+                      <div>
+                        <span>Saved</span>
+                        <strong>{project.initial_setup_saved_at ? new Date(project.initial_setup_saved_at).toLocaleString() : "Draft"}</strong>
+                      </div>
+                    </div>
+                  </div>
+                ) : (
+                  <>
+                    <label>
+                      <span>Project name</span>
+                      <input
+                        value={project.project_name}
+                        onChange={(event) => patchProject({ project_name: event.target.value })}
+                      />
+                    </label>
+                    <div className="field-row compact-field-row">
+                      <label>
+                        <span>Start date</span>
+                        <input
+                          type="date"
+                          value={project.moed_a_window.start_date}
+                          onChange={(event) =>
+                            patchProject({
+                              moed_a_window: { ...project.moed_a_window, start_date: event.target.value },
+                            })
+                          }
+                        />
+                      </label>
+                      <label>
+                        <span>End date</span>
+                        <input
+                          type="date"
+                          value={project.moed_a_window.end_date}
+                          onChange={(event) =>
+                            patchProject({
+                              moed_a_window: { ...project.moed_a_window, end_date: event.target.value },
+                            })
+                          }
+                        />
+                      </label>
+                    </div>
+                    <div className="field-row field-row-triple compact-field-row">
+                      <label>
+                        <span>Same semester gap</span>
+                        <input
+                          type="number"
+                          min="1"
+                          max="30"
+                          value={project.constraint_config.same_semester_gap_days}
+                          onChange={(event) =>
+                            patchProject({
+                              constraint_config: {
+                                ...project.constraint_config,
+                                same_semester_gap_days: Number(event.target.value),
+                              },
+                            })
+                          }
+                        />
+                      </label>
+                      <label>
+                        <span>Prerequisite gap</span>
+                        <input
+                          type="number"
+                          min="1"
+                          max="30"
+                          value={project.constraint_config.prerequisite_gap_days}
+                          onChange={(event) =>
+                            patchProject({
+                              constraint_config: {
+                                ...project.constraint_config,
+                                prerequisite_gap_days: Number(event.target.value),
+                              },
+                            })
+                          }
+                        />
+                      </label>
+                      <label>
+                        <span>High-failure gap</span>
+                        <input
+                          type="number"
+                          min="1"
+                          max="30"
+                          value={project.constraint_config.high_failure_gap_days}
+                          onChange={(event) =>
+                            patchProject({
+                              constraint_config: {
+                                ...project.constraint_config,
+                                high_failure_gap_days: Number(event.target.value),
+                              },
+                            })
+                          }
+                        />
+                      </label>
+                    </div>
+                    <div className="button-row initial-entry-actions">
+                      <button type="button" onClick={handleSaveInitialSetup}>
+                        {hasInitialSetup ? "Update initial setup" : "Save initial setup"}
+                      </button>
+                    </div>
+                  </>
+                )}
+              </div>
+            </section>
+
+            {hasInitialSetup ? (
+              <>
+            <div className="setup-shell-header locked-summary-header">
+              <div className="setup-summary-row">
+                <span>{project.excluded_ranges.length} excluded ranges</span>
+                <span>{project.fixed_exams.length} fixed exams</span>
+                <span>{project.courses.length} courses</span>
+                <span>{project.solutions.length} solutions</span>
+              </div>
+            </div>
+
+            <div className="setup-sections-grid">
+            <section
+              className="setup-step-panel setup-category-panel"
+              ref={(element) => {
+                setupSectionRefs.current.excluded = element;
+              }}
+            >
+              <SectionTitle title={SETUP_STEPS[1].title} subtitle={SETUP_STEPS[1].subtitle} />
+              <div className="setup-step-content compact-step-content">
                 <ExcludedRangeForm
                   key={editingExcludedIndex === null ? "new-excluded-range" : `edit-excluded-range-${editingExcludedIndex}`}
                   initialValue={editingExcludedIndex === null ? undefined : project.excluded_ranges[editingExcludedIndex]}
@@ -532,10 +834,16 @@ function App() {
                   onRemove={removeExcludedRange}
                 />
               </div>
-            ) : null}
+            </section>
 
-            {activeSetupStep === "fixed" ? (
-              <div className="setup-step-content">
+            <section
+              className="setup-step-panel setup-category-panel"
+              ref={(element) => {
+                setupSectionRefs.current.fixed = element;
+              }}
+            >
+              <SectionTitle title={SETUP_STEPS[2].title} subtitle={SETUP_STEPS[2].subtitle} />
+              <div className="setup-step-content compact-step-content">
                 <FixedExamForm
                   key={editingFixedExamIndex === null ? "new-fixed-exam" : `edit-fixed-exam-${editingFixedExamIndex}`}
                   initialValue={editingFixedExamIndex === null ? undefined : project.fixed_exams[editingFixedExamIndex]}
@@ -543,17 +851,23 @@ function App() {
                   onCancel={editingFixedExamIndex === null ? undefined : () => setEditingFixedExamIndex(null)}
                 />
                 <EditableSimpleList
-                  items={project.fixed_exams.map((exam) => `${exam.course_code} on ${exam.exam_date}`)}
+                  items={project.fixed_exams.map((exam) => formatFixedExamItem(exam))}
                   emptyMessage="No fixed exams yet."
                   onEdit={setEditingFixedExamIndex}
                   onRemove={removeFixedExam}
                 />
               </div>
-            ) : null}
+            </section>
 
-            {activeSetupStep === "courses" ? (
-              <div className="setup-step-content">
-                <div className="stack-form import-panel">
+            <section
+              className="setup-step-panel setup-category-panel"
+              ref={(element) => {
+                setupSectionRefs.current.courses = element;
+              }}
+            >
+              <SectionTitle title={SETUP_STEPS[3].title} subtitle={SETUP_STEPS[3].subtitle} />
+              <div className="setup-step-content compact-step-content">
+                <div className="stack-form import-panel compact-import-panel">
                   <div className="file-input-row">
                     <div>
                       <span className="file-input-label">Excel course template</span>
@@ -593,21 +907,31 @@ function App() {
                   onSubmit={saveCourse}
                   onCancel={editingCourseIndex === null ? undefined : () => setEditingCourseIndex(null)}
                 />
-                <div className="list-section-header">
+                <div className="list-section-header compact-list-header">
                   <div>
                     <strong>Current course list</strong>
                     <p className="field-hint">{project.courses.length} courses in the current draft.</p>
                   </div>
-                  <button
-                    type="button"
-                    className="secondary-button"
-                    onClick={() => setCoursesListCollapsed((current) => !current)}
-                  >
-                    {coursesListCollapsed ? "Expand list" : "Collapse list"}
-                  </button>
+                  <div className="row-actions">
+                    <button
+                      type="button"
+                      className="secondary-button"
+                      disabled={busyAction !== null || project.courses.length === 0}
+                      onClick={resetCourseList}
+                    >
+                      Reset list
+                    </button>
+                    <button
+                      type="button"
+                      className="secondary-button"
+                      onClick={() => setCoursesListCollapsed((current) => !current)}
+                    >
+                      {coursesListCollapsed ? "Expand list" : "Collapse list"}
+                    </button>
+                  </div>
                 </div>
                 {!coursesListCollapsed ? (
-                  <div className="table-wrap">
+                  <div className="table-wrap compact-table-wrap">
                     <table>
                       <thead>
                         <tr>
@@ -633,7 +957,7 @@ function App() {
                               <td>{course.course_name}</td>
                               <td>{course.semester_number}</td>
                               <td>{course.high_failure_rate ? "Yes" : "No"}</td>
-                              <td>{course.prerequisite_course_code || "-"}</td>
+                              <td>{course.prerequisite_course_codes.length > 0 ? course.prerequisite_course_codes.join(", ") : "-"}</td>
                               <td>
                                 <div className="row-actions">
                                   <button type="button" className="secondary-button" onClick={() => setEditingCourseIndex(index)}>
@@ -652,40 +976,118 @@ function App() {
                   </div>
                 ) : null}
               </div>
-            ) : null}
+            </section>
           </div>
 
           <div className="setup-flow-footer">
-            <div className="setup-summary-row">
-              <span>{project.excluded_ranges.length} excluded ranges</span>
-              <span>{project.fixed_exams.length} fixed exams</span>
-              <span>{project.courses.length} courses</span>
-            </div>
             <div className="button-row setup-actions">
-              {previousSetupStep ? (
-                <button type="button" className="secondary-button" onClick={() => changeSetupStep(previousSetupStep.id)}>
-                  Previous
-                </button>
-              ) : null}
-              {nextSetupStep ? (
-                <button type="button" onClick={() => changeSetupStep(nextSetupStep.id)}>
-                  Next: {nextSetupStep.title}
-                </button>
-              ) : (
-                <>
-                  <button onClick={handleValidate} disabled={busyAction !== null}>
-                    {busyAction === "validate" ? "Validating..." : "Validate draft"}
-                  </button>
-                  <button className="accent-button" onClick={handleSolve} disabled={busyAction !== null}>
-                    {busyAction === "solve" ? "Solving..." : "Generate options"}
-                  </button>
-                </>
-              )}
+              <button onClick={handleValidate} disabled={busyAction !== null}>
+                {busyAction === "validate" ? "Validating..." : "Validate draft"}
+              </button>
+              <button className="accent-button" onClick={handleSolve} disabled={busyAction !== null}>
+                {busyAction === "solve" ? "Solving..." : "Generate options"}
+              </button>
             </div>
           </div>
-        </section>
+              </>
+            ) : (
+              <div className="setup-locked-state">
+                <p className="empty-state">Save the initial setup entry first. After that, excluded dates, fixed exams, and courses will unlock here.</p>
+              </div>
+            )}
+          </section>
+          <aside className="setup-side-rail">
+            <section className="panel setup-side-panel">
+              <SectionTitle title="Current Entry" subtitle="The initial setup is stored separately so it can become a reusable yearly template later." />
+              <div className="status-card compact-status-card neutral-status-card">
+                <span className="status-label">Workspace status</span>
+                <strong>{status}</strong>
+              </div>
+              <div className="setup-summary-grid side-summary-grid">
+                <div>
+                  <span>Year folder</span>
+                  <strong>{project.moed_a_window.start_date.slice(0, 4)}</strong>
+                </div>
+                <div>
+                  <span>Saved setups</span>
+                  <strong>{allSavedSetups.length}</strong>
+                </div>
+                <div>
+                  <span>Courses</span>
+                  <strong>{project.courses.length}</strong>
+                </div>
+                <div>
+                  <span>Solutions</span>
+                  <strong>{project.solutions.length}</strong>
+                </div>
+              </div>
+            </section>
 
-        <section className="panel panel-wide">
+            <section className="panel setup-side-panel">
+              <SectionTitle title="Saved Setups" subtitle="Grouped by year now so future file-based folders can mirror the same structure." />
+              {sortedSetupYears.length === 0 ? (
+                <p className="empty-state">No saved initial setups yet.</p>
+              ) : (
+                <div className="saved-setup-library">
+                  {sortedSetupYears.map((yearKey) => (
+                    <section key={yearKey} className="year-folder-group">
+                      <button
+                        type="button"
+                        className="year-folder-toggle"
+                        onClick={() =>
+                          setCollapsedSetupYears((current) => ({
+                            ...current,
+                            [yearKey]: !(current[yearKey] ?? false),
+                          }))
+                        }
+                      >
+                        <span>{yearKey}</span>
+                        <span>
+                          {setupLibrary[yearKey].length} setup{setupLibrary[yearKey].length === 1 ? "" : "s"} {collapsedSetupYears[yearKey] ? "+" : "-"}
+                        </span>
+                      </button>
+                      {!collapsedSetupYears[yearKey] ? (
+                        <div className="year-folder-list">
+                          {setupLibrary[yearKey].map((entry) => (
+                            <div key={entry.entry_id} className="saved-setup-item">
+                              <button
+                                type="button"
+                                className={entry.entry_id === project.setup_entry_id ? "saved-setup-button active" : "saved-setup-button"}
+                                onClick={() => handleUseSavedSetup(entry)}
+                              >
+                                <strong>{entry.project_name}</strong>
+                                <span>{entry.moed_a_window.start_date} to {entry.moed_a_window.end_date}</span>
+                              </button>
+                              <button
+                                type="button"
+                                className="saved-setup-delete"
+                                aria-label={`Delete ${entry.project_name}`}
+                                onClick={() => handleDeleteSavedSetup(entry)}
+                              >
+                                <svg viewBox="0 0 16 16" aria-hidden="true" focusable="false">
+                                  <path d="M3.5 4.5h9" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" />
+                                  <path d="M6 4.5v-1A1.5 1.5 0 0 1 7.5 2h1A1.5 1.5 0 0 1 10 3.5v1" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" />
+                                  <path d="M5 6.5v5.5A1.5 1.5 0 0 0 6.5 13.5h3A1.5 1.5 0 0 0 11 12V6.5" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" />
+                                  <path d="M7 7.5v4" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" />
+                                  <path d="M9 7.5v4" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" />
+                                </svg>
+                              </button>
+                            </div>
+                          ))}
+                        </div>
+                      ) : null}
+                    </section>
+                  ))}
+                </div>
+              )}
+            </section>
+          </aside>
+          </div>
+        ) : null}
+
+        {activeRoute === "/schedule" ? (
+          <>
+        <section className="panel panel-wide route-panel">
           <div className="workspace-tabs">
             <button
               type="button"
@@ -763,12 +1165,17 @@ function App() {
                         previewResponses={previewResponses}
                         previewLoading={previewLoading}
                         showChanges={showChanges}
+                        activeConflict={activeConflict}
                         onSelectExam={(exam) => {
+                          setSelectedConflictKey(null);
                           setSelectedExamKey(getExamMoveKey(activeSolution.solution_id, exam.course_code));
                           setSelectedPreviewDate(exam.exam_date);
                           setGraphFocusCourseCode(exam.course_code);
                         }}
-                        onSelectPreviewDate={setSelectedPreviewDate}
+                        onSelectPreviewDate={(date) => {
+                          setSelectedConflictKey(null);
+                          setSelectedPreviewDate(date);
+                        }}
                       />
                       <ConflictDrawer
                         solution={activeSolution}
@@ -777,12 +1184,15 @@ function App() {
                         selectedPreviewDate={selectedPreviewDate}
                         previewResponse={previewResponse}
                         previewStatus={previewStatus}
+                        activeConflict={activeConflict}
+                        onSelectConflict={handleFocusConflict}
                         onApplyMove={() => {
                           if (selectedExam && selectedPreviewDate) {
                             void handleManualMove(activeSolution, selectedExam, selectedPreviewDate);
                           }
                         }}
                         onClearSelection={() => {
+                          setSelectedConflictKey(null);
                           setSelectedExamKey(null);
                           setSelectedPreviewDate(null);
                         }}
@@ -825,7 +1235,7 @@ function App() {
           </div>
         </section>
 
-        <section className="panel panel-wide">
+        <section className="panel panel-wide route-panel">
           <SectionTitle title="Solution Details" subtitle="Secondary detail table with direct date input controls for the active solution." />
           {activeSolution ? (
             <SolutionCard
@@ -849,10 +1259,12 @@ function App() {
           )}
         </section>
 
-        <section className="panel panel-wide">
+        <section className="panel panel-wide route-panel">
           <SectionTitle title="Issues" subtitle="Validation and solver feedback will appear here." />
           <IssueList issues={project.issues} />
         </section>
+          </>
+        ) : null}
       </main>
     </div>
   );

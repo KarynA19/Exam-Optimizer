@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import date
 from typing import Literal
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import AliasChoices, BaseModel, Field, field_validator, model_validator
 
 IssueSeverity = Literal["error", "warning"]
 IssueCode = Literal[
@@ -34,11 +34,45 @@ class ExcludedDateRange(DateRange):
     reason: str = Field(min_length=1, max_length=120)
 
 
+def normalize_prerequisite_course_codes(value: object) -> list[str]:
+    if value is None or value == "":
+        return []
+
+    if isinstance(value, str):
+        raw_values = value.replace(";", ",").split(",")
+    elif isinstance(value, list):
+        raw_values = value
+    else:
+        raw_values = [value]
+
+    normalized: list[str] = []
+    for raw_value in raw_values:
+        text = str(raw_value).strip()
+        if not text:
+            continue
+        if len(text) > 30:
+            raise ValueError("Each prerequisite course code must be at most 30 characters.")
+        if text not in normalized:
+            normalized.append(text)
+
+    return normalized
+
+
 class FixedExam(BaseModel):
     course_code: str = Field(min_length=1, max_length=30)
+    course_name: str = Field(min_length=1, max_length=160)
+    prerequisite_course_codes: list[str] = Field(
+        default_factory=list,
+        validation_alias=AliasChoices("prerequisite_course_codes", "prerequisite_course_code"),
+    )
     exam_date: date
     locked: bool = True
     reason: str | None = Field(default=None, max_length=200)
+
+    @field_validator("prerequisite_course_codes", mode="before")
+    @classmethod
+    def normalize_prerequisite_course_codes_field(cls, value: object) -> list[str]:
+        return normalize_prerequisite_course_codes(value)
 
 
 class CourseInput(BaseModel):
@@ -46,7 +80,15 @@ class CourseInput(BaseModel):
     course_name: str = Field(min_length=1, max_length=160)
     semester_number: int = Field(ge=1, le=12)
     high_failure_rate: bool = False
-    prerequisite_course_code: str | None = Field(default=None, max_length=30)
+    prerequisite_course_codes: list[str] = Field(
+        default_factory=list,
+        validation_alias=AliasChoices("prerequisite_course_codes", "prerequisite_course_code"),
+    )
+
+    @field_validator("prerequisite_course_codes", mode="before")
+    @classmethod
+    def normalize_prerequisite_course_codes(cls, value: object) -> list[str]:
+        return normalize_prerequisite_course_codes(value)
 
 
 class ScheduledExam(BaseModel):
@@ -65,6 +107,7 @@ class ValidationIssue(BaseModel):
 
 class ConstraintConfig(BaseModel):
     same_semester_gap_days: int = Field(default=3, ge=1, le=30)
+    adjacent_semester_gap_days: int = Field(default=2, ge=1, le=30)
     prerequisite_gap_days: int = Field(default=3, ge=1, le=30)
     high_failure_gap_days: int = Field(default=3, ge=1, le=30)
 

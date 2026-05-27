@@ -15,7 +15,15 @@ export function CourseForm({
   const [courseName, setCourseName] = useState(initialValue?.course_name ?? "");
   const [semesterNumber, setSemesterNumber] = useState(String(initialValue?.semester_number ?? 1));
   const [highFailureRate, setHighFailureRate] = useState(initialValue?.high_failure_rate ?? false);
-  const [prerequisiteCourseCode, setPrerequisiteCourseCode] = useState(initialValue?.prerequisite_course_code ?? "");
+  const [prerequisiteCourseCodes, setPrerequisiteCourseCodes] = useState(initialValue?.prerequisite_course_codes.join(", ") ?? "");
+
+  function parsePrerequisiteCourseCodes(value: string): string[] {
+    return value
+      .replace(/;/g, ",")
+      .split(",")
+      .map((entry: string) => entry.trim())
+      .filter((entry: string) => entry.length > 0);
+  }
 
   return (
     <form
@@ -27,13 +35,13 @@ export function CourseForm({
           course_name: courseName,
           semester_number: Number(semesterNumber),
           high_failure_rate: highFailureRate,
-          prerequisite_course_code: prerequisiteCourseCode || null,
+          prerequisite_course_codes: parsePrerequisiteCourseCodes(prerequisiteCourseCodes),
         });
         setCourseCode("");
         setCourseName("");
         setSemesterNumber("1");
         setHighFailureRate(false);
-        setPrerequisiteCourseCode("");
+        setPrerequisiteCourseCodes("");
       }}
     >
       <div className="field-row field-row-triple">
@@ -59,13 +67,17 @@ export function CourseForm({
       </div>
       <div className="field-row">
         <label>
-          <span>Prerequisite course code</span>
-          <input value={prerequisiteCourseCode} onChange={(event) => setPrerequisiteCourseCode(event.target.value)} />
+          <span>Prerequisite course codes</span>
+          <input
+            value={prerequisiteCourseCodes}
+            onChange={(event) => setPrerequisiteCourseCodes(event.target.value)}
+            placeholder="ALG1, CALC1"
+          />
         </label>
-        <label className="toggle-field">
+        <div className="toggle-field">
           <span>High failure rate</span>
           <input type="checkbox" checked={highFailureRate} onChange={(event) => setHighFailureRate(event.target.checked)} />
-        </label>
+        </div>
       </div>
       <div className="button-row button-row-inline">
         <button type="submit">{initialValue ? "Save course" : "Add course"}</button>

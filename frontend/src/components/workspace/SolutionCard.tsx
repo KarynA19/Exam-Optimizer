@@ -69,7 +69,7 @@ export function SolutionCard({
                     <td>{exam.course_code}</td>
                     <td>{courseNameByCode[exam.course_code] ?? "Unknown course"}</td>
                     <td>{course?.semester_number ?? "-"}</td>
-                    <td>{course?.prerequisite_course_code ?? "-"}</td>
+                    <td>{course && course.prerequisite_course_codes.length > 0 ? course.prerequisite_course_codes.join(", ") : "-"}</td>
                     <td>{exam.exam_date}</td>
                     <td>{originalExam?.exam_date ?? "-"}</td>
                     <td>
