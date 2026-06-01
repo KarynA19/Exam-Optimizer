@@ -2,6 +2,8 @@ import { useState } from "react";
 
 import type { CourseInput } from "../../types";
 
+type DepartmentOption = "ALL" | "SW" | "IS";
+
 export function CourseForm({
   initialValue,
   onSubmit,
@@ -15,6 +17,7 @@ export function CourseForm({
   const [courseName, setCourseName] = useState(initialValue?.course_name ?? "");
   const [semesterNumber, setSemesterNumber] = useState(String(initialValue?.semester_number ?? 1));
   const [highFailureRate, setHighFailureRate] = useState(initialValue?.high_failure_rate ?? false);
+  const [department, setDepartment] = useState<DepartmentOption>(initialValue?.department ?? "ALL");
   const [prerequisiteCourseCodes, setPrerequisiteCourseCodes] = useState(initialValue?.prerequisite_course_codes.join(", ") ?? "");
 
   function parsePrerequisiteCourseCodes(value: string): string[] {
@@ -35,12 +38,14 @@ export function CourseForm({
           course_name: courseName,
           semester_number: Number(semesterNumber),
           high_failure_rate: highFailureRate,
+          department: department === "ALL" ? null : department,
           prerequisite_course_codes: parsePrerequisiteCourseCodes(prerequisiteCourseCodes),
         });
         setCourseCode("");
         setCourseName("");
         setSemesterNumber("1");
         setHighFailureRate(false);
+        setDepartment("ALL");
         setPrerequisiteCourseCodes("");
       }}
     >
@@ -73,6 +78,14 @@ export function CourseForm({
             onChange={(event) => setPrerequisiteCourseCodes(event.target.value)}
             placeholder="ALG1, CALC1"
           />
+        </label>
+        <label>
+          <span>Department</span>
+          <select value={department} onChange={(event) => setDepartment(event.target.value as DepartmentOption)}>
+            <option value="ALL">All departments</option>
+            <option value="SW">SW</option>
+            <option value="IS">IS</option>
+          </select>
         </label>
         <div className="toggle-field">
           <span>High failure rate</span>

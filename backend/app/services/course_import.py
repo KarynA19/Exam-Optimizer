@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import date
 from io import BytesIO
 
-from openpyxl import load_workbook
+from openpyxl import Workbook, load_workbook
 from pydantic import ValidationError
 
 from app.models.schedule import CourseImportResponse, CourseInput, DateRange, ScheduleProject, ValidationIssue
@@ -15,6 +15,7 @@ EXPECTED_HEADERS = [
     "semester",
     "is high failure",
     "prerequisites",
+    "department",
 ]
 
 DISPLAY_HEADERS = [
@@ -23,6 +24,7 @@ DISPLAY_HEADERS = [
     "Semester",
     "Is High Failure",
     "Prerequisites",
+    "Department",
 ]
 
 TRUTHY_VALUES = {"1", "true", "yes", "y"}
@@ -172,6 +174,26 @@ def _parse_high_failure(value: object) -> bool:
     raise ValueError("Is High Failure must be one of yes/no, true/false, or 1/0.")
 
 
+def _parse_department(value: object) -> str | None:
+    text = _cell_text(value).upper()
+    if not text:
+        return None
+    if text in {"SW", "IS"}:
+        return text
+    raise ValueError("Department must be empty, SW, or IS.")
+
+
+def export_course_template_excel() -> bytes:
+    workbook = Workbook()
+    worksheet = workbook.active
+    worksheet.title = "Courses"
+    worksheet.append(DISPLAY_HEADERS)
+
+    buffer = BytesIO()
+    workbook.save(buffer)
+    return buffer.getvalue()
+
+
 def import_courses_from_excel(content: bytes) -> CourseImportResponse:
     try:
         workbook = load_workbook(filename=BytesIO(content), data_only=True)
@@ -179,7 +201,7 @@ def import_courses_from_excel(content: bytes) -> CourseImportResponse:
         raise CourseImportError([_build_issue("Uploaded file is not a valid .xlsx workbook.")]) from error
 
     worksheet = workbook.worksheets[0]
-    actual_header_labels = [_cell_text(worksheet.cell(row=1, column=column).value) for column in range(1, 6)]
+    actual_header_labels = [_cell_text(worksheet.cell(row=1, column=column).value) for column in range(1, 7)]
     actual_headers = [_normalize_header(header) for header in actual_header_labels]
 
     if actual_headers != EXPECTED_HEADERS:
@@ -190,7 +212,7 @@ def import_courses_from_excel(content: bytes) -> CourseImportResponse:
     row_numbers_by_code: dict[str, list[int]] = {}
 
     for row_number in range(2, worksheet.max_row + 1):
-        raw_values = [worksheet.cell(row=row_number, column=column).value for column in range(1, 6)]
+        raw_values = [worksheet.cell(row=row_number, column=column).value for column in range(1, 7)]
         if all(_cell_text(value) == "" for value in raw_values):
             continue
 
@@ -201,12 +223,14 @@ def import_courses_from_excel(content: bytes) -> CourseImportResponse:
         try:
             semester_number = _parse_semester(raw_values[2])
             high_failure_rate = _parse_high_failure(raw_values[3])
+            department = _parse_department(raw_values[5])
             courses.append(
                 CourseInput(
                     course_code=course_code,
                     course_name=course_name,
                     semester_number=semester_number,
                     high_failure_rate=high_failure_rate,
+                    department=department,
                     prerequisite_course_codes=prerequisite_codes,
                 )
             )
@@ -228,7 +252,7 @@ def import_courses_from_excel(content: bytes) -> CourseImportResponse:
 
     validation_project = ScheduleProject(
         project_name="Imported Courses",
-        moed_a_window=DateRange(start_date=date(2026, 1, 1), end_date=date(2026, 1, 1)),
+        moed_windows=[DateRange(start_date=date(2026, 1, 1), end_date=date(2026, 1, 1))],
         courses=courses,
     )
     validation_issues = validate_project(validation_project)

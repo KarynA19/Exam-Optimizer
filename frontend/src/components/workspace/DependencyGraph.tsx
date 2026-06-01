@@ -1,4 +1,5 @@
 import type { CourseInput, ScheduleSolution } from "../../types";
+import { getDepartmentClassName, getDepartmentShortLabel } from "../../utils/departmentUtils";
 import type { DependencyEdgeType } from "../../utils/workspaceUtils";
 
 export function DependencyGraph({
@@ -50,10 +51,10 @@ export function DependencyGraph({
           <button
             key={course.course_code}
             type="button"
-            className={course.course_code === focusCourseCode ? "solution-tab active" : "solution-tab"}
+            className={[course.course_code === focusCourseCode ? "solution-tab active" : "solution-tab", getDepartmentClassName(course)].join(" ")}
             onClick={() => onSelectCourse(course.course_code === focusCourseCode ? "" : course.course_code)}
           >
-            {course.course_code}
+            {course.course_code} · {getDepartmentShortLabel(course)}
           </button>
         ))}
       </div>
@@ -82,12 +83,12 @@ export function DependencyGraph({
           const changed = changedCourseCodes.includes(node.course_code);
           return (
             <g key={node.course_code} className={dimmed ? "graph-node dimmed" : "graph-node"} onClick={() => onSelectCourse(node.course_code)}>
-              <circle cx={node.x} cy={node.y} r={changed ? 34 : 28} className={changed ? "graph-node-circle changed" : "graph-node-circle"} />
+              <circle cx={node.x} cy={node.y} r={changed ? 34 : 28} className={["graph-node-circle", getDepartmentClassName(node), changed ? "changed" : ""].filter(Boolean).join(" ")} />
               <text x={node.x} y={node.y - 4} textAnchor="middle" className="graph-node-code">
                 {node.course_code}
               </text>
               <text x={node.x} y={node.y + 14} textAnchor="middle" className="graph-node-label">
-                S{node.semester_number}
+                S{node.semester_number} · {getDepartmentShortLabel(node)}
               </text>
               {node.examDate ? (
                 <text x={node.x} y={node.y + 30} textAnchor="middle" className="graph-node-date">

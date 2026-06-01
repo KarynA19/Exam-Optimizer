@@ -1,14 +1,14 @@
 from io import BytesIO
 
-from openpyxl import Workbook
+from openpyxl import Workbook, load_workbook
 
-from app.services.course_import import CourseImportError, import_courses_from_excel
+from app.services.course_import import CourseImportError, export_course_template_excel, import_courses_from_excel
 
 
 def build_workbook_bytes(rows: list[list[object]], headers: list[str] | None = None) -> bytes:
     workbook = Workbook()
     worksheet = workbook.active
-    worksheet.append(headers or ["Course ID", "Course Name", "Semester", "Is High Failure", "Prerequisites"])
+    worksheet.append(headers or ["Course ID", "Course Name", "Semester", "Is High Failure", "Prerequisites", "Department"])
     for row in rows:
         worksheet.append(row)
 
@@ -20,8 +20,8 @@ def build_workbook_bytes(rows: list[list[object]], headers: list[str] | None = N
 def test_import_courses_from_excel_parses_valid_template() -> None:
     content = build_workbook_bytes(
         [
-            ["ALG1", "Algebra 1", 1, "yes", ""],
-            ["ALG2", "Algebra 2", 2, "no", "ALG1"],
+            ["ALG1", "Algebra 1", 1, "yes", "", ""],
+            ["ALG2", "Algebra 2", 2, "no", "ALG1", "sw"],
         ]
     )
 
@@ -30,15 +30,17 @@ def test_import_courses_from_excel_parses_valid_template() -> None:
     assert result.imported_count == 2
     assert result.courses[0].course_code == "ALG1"
     assert result.courses[0].high_failure_rate is True
+    assert result.courses[0].department is None
     assert result.courses[1].prerequisite_course_codes == ["ALG1"]
+    assert result.courses[1].department == "SW"
 
 
 def test_import_courses_from_excel_parses_multiple_prerequisites() -> None:
     content = build_workbook_bytes(
         [
-            ["ALG1", "Algebra 1", 1, "yes", ""],
-            ["CALC1", "Calculus 1", 2, "no", ""],
-            ["ALG3", "Advanced Algebra", 3, "no", "ALG1, CALC1"],
+            ["ALG1", "Algebra 1", 1, "yes", "", ""],
+            ["CALC1", "Calculus 1", 2, "no", "", "IS"],
+            ["ALG3", "Advanced Algebra", 3, "no", "ALG1, CALC1", ""],
         ]
     )
 
@@ -48,7 +50,10 @@ def test_import_courses_from_excel_parses_multiple_prerequisites() -> None:
 
 
 def test_import_courses_from_excel_rejects_invalid_headers() -> None:
-    content = build_workbook_bytes([["ALG1", "Algebra 1", 1, "yes", ""]], headers=["Wrong", "Course Name", "Semester", "Is High Failure", "Prerequisites"])
+    content = build_workbook_bytes(
+        [["ALG1", "Algebra 1", 1, "yes", "", ""]],
+        headers=["Wrong", "Course Name", "Semester", "Is High Failure", "Prerequisites", "Department"],
+    )
 
     try:
         import_courses_from_excel(content)
@@ -59,7 +64,7 @@ def test_import_courses_from_excel_rejects_invalid_headers() -> None:
 
 
 def test_import_courses_from_excel_rejects_invalid_high_failure_value() -> None:
-    content = build_workbook_bytes([["ALG1", "Algebra 1", 1, "maybe", ""]])
+    content = build_workbook_bytes([["ALG1", "Algebra 1", 1, "maybe", "", ""]])
 
     try:
         import_courses_from_excel(content)
@@ -70,7 +75,7 @@ def test_import_courses_from_excel_rejects_invalid_high_failure_value() -> None:
 
 
 def test_import_courses_from_excel_rejects_missing_prerequisite_target() -> None:
-    content = build_workbook_bytes([["ALG2", "Algebra 2", 2, "no", "ALG1"]])
+    content = build_workbook_bytes([["ALG2", "Algebra 2", 2, "no", "ALG1", ""]])
 
     try:
         import_courses_from_excel(content)
@@ -83,8 +88,8 @@ def test_import_courses_from_excel_rejects_missing_prerequisite_target() -> None
 def test_import_courses_from_excel_rejects_duplicate_course_codes() -> None:
     content = build_workbook_bytes(
         [
-            ["ALG1", "Algebra 1", 1, "yes", ""],
-            ["ALG1", "Linear Algebra", 1, "no", ""],
+            ["ALG1", "Algebra 1", 1, "yes", "", ""],
+            ["ALG1", "Linear Algebra", 1, "no", "", "IS"],
         ]
     )
 
@@ -105,3 +110,24 @@ def test_import_courses_from_excel_rejects_empty_workbook() -> None:
         assert any("does not contain any course rows" in issue.message for issue in error.issues)
     else:
         raise AssertionError("Expected CourseImportError for empty workbook.")
+
+
+def test_import_courses_from_excel_rejects_invalid_department_value() -> None:
+    content = build_workbook_bytes([["ALG1", "Algebra 1", 1, "yes", "", "EE"]])
+
+    try:
+        import_courses_from_excel(content)
+    except CourseImportError as error:
+        assert any("Row 2: Department must be empty, SW, or IS." == issue.message for issue in error.issues)
+    else:
+        raise AssertionError("Expected CourseImportError for invalid department value.")
+
+
+def test_export_course_template_excel_uses_current_headers() -> None:
+    content = export_course_template_excel()
+
+    workbook = load_workbook(filename=BytesIO(content), data_only=True)
+    worksheet = workbook.active
+    headers = [worksheet.cell(row=1, column=column).value for column in range(1, 7)]
+
+    assert headers == ["Course ID", "Course Name", "Semester", "Is High Failure", "Prerequisites", "Department"]

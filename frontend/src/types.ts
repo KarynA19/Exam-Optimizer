@@ -13,6 +13,13 @@ export type DateRange = {
   end_date: string;
 };
 
+export type MoedWindow = DateRange & {
+  moed_number: number;
+  same_semester_gap_days: number;
+  prerequisite_gap_days: number;
+  high_failure_gap_days: number;
+};
+
 export type ExcludedDateRange = DateRange & {
   reason: string;
 };
@@ -26,16 +33,20 @@ export type FixedExam = {
   reason?: string | null;
 };
 
+export type CourseDepartment = "SW" | "IS" | null;
+
 export type CourseInput = {
   course_code: string;
   course_name: string;
   semester_number: number;
   high_failure_rate: boolean;
+  department: CourseDepartment;
   prerequisite_course_codes: string[];
 };
 
 export type ScheduledExam = {
   course_code: string;
+  moed_number: number;
   exam_date: string;
   source: "solver" | "fixed" | "manual";
 };
@@ -45,13 +56,20 @@ export type ConstraintConfig = {
   adjacent_semester_gap_days: number;
   prerequisite_gap_days: number;
   high_failure_gap_days: number;
+  global_spacing_weight: number;
+};
+
+export type SolutionDiagnostics = {
+  target_gap_days: number;
+  spacing_deviation: number;
+  spacing_score: number;
 };
 
 export type SavedSetupEntry = {
   entry_id: string;
   year: number;
   project_name: string;
-  moed_a_window: DateRange;
+  moed_windows: MoedWindow[];
   constraint_config: ConstraintConfig;
   saved_at: string;
 };
@@ -63,14 +81,17 @@ export type ScheduleSolution = {
   score: number;
   exams: ScheduledExam[];
   issues: ValidationIssue[];
+  diagnostics: SolutionDiagnostics;
   original_exams?: ScheduledExam[];
   original_score?: number;
+  original_diagnostics?: SolutionDiagnostics;
 };
 
 export type ManualMoveUpdatedSolution = {
   solution_id: string;
   score: number;
   exams: ScheduledExam[];
+  diagnostics: SolutionDiagnostics;
 };
 
 export type ManualMoveResponse = {
@@ -88,7 +109,7 @@ export type CourseImportResponse = {
 
 export type ScheduleProject = {
   project_name: string;
-  moed_a_window: DateRange;
+  moed_windows: MoedWindow[];
   constraint_config: ConstraintConfig;
   setup_entry_id?: string | null;
   initial_setup_saved_at?: string | null;
@@ -101,15 +122,22 @@ export type ScheduleProject = {
 
 export const createEmptyProject = (): ScheduleProject => ({
   project_name: "Spring Moed A",
-  moed_a_window: {
-    start_date: "2026-06-15",
-    end_date: "2026-07-15",
-  },
+  moed_windows: [
+    {
+      moed_number: 1,
+      start_date: "2026-06-15",
+      end_date: "2026-07-15",
+      same_semester_gap_days: 3,
+      prerequisite_gap_days: 3,
+      high_failure_gap_days: 3,
+    },
+  ],
   constraint_config: {
     same_semester_gap_days: 3,
     adjacent_semester_gap_days: 2,
     prerequisite_gap_days: 3,
     high_failure_gap_days: 3,
+    global_spacing_weight: 4,
   },
   setup_entry_id: null,
   initial_setup_saved_at: null,

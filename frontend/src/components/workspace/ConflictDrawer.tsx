@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 
 import type { CourseInput, ScheduleSolution, ScheduledExam, ValidationIssue } from "../../types";
+import { getDepartmentClassName, getDepartmentLabel, getDepartmentShortLabel } from "../../utils/departmentUtils";
 import type { PreviewResponse, PreviewStatus } from "../../utils/workspaceUtils";
 
 function getConflictKey(issue: ValidationIssue): string {
@@ -96,6 +97,13 @@ export function ConflictDrawer({
               </button>
             </div>
 
+            {selectedCourse ? (
+              <div className="drawer-department-row">
+                <span className={["department-badge", getDepartmentClassName(selectedCourse)].join(" ")}>{getDepartmentShortLabel(selectedCourse)}</span>
+                <span>{getDepartmentLabel(selectedCourse)}</span>
+              </div>
+            ) : null}
+
             <div className="conflict-legend">
               <span><i className="conflict-dot high" />High Severity {highSeverityCount}</span>
               <span><i className="conflict-dot medium" />Medium Severity {mediumSeverityCount}</span>
@@ -115,6 +123,10 @@ export function ConflictDrawer({
               <div>
                 <span>Score delta</span>
                 <strong>{scoreDelta >= 0 ? `+${scoreDelta}` : scoreDelta}</strong>
+              </div>
+              <div>
+                <span>Department</span>
+                <strong>{selectedCourse ? getDepartmentShortLabel(selectedCourse) : "ALL"}</strong>
               </div>
             </div>
 

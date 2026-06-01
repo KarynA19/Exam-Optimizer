@@ -52,6 +52,7 @@ export async function manualMoveProject(
   project: ScheduleProject,
   solutionId: string,
   courseCode: string,
+  moedNumber: number,
   newDate: string,
 ): Promise<ManualMoveResponse> {
   const response = await fetch(`${API_BASE}/projects/manual-move`, {
@@ -63,6 +64,7 @@ export async function manualMoveProject(
       project,
       solution_id: solutionId,
       course_code: courseCode,
+      moed_number: moedNumber,
       new_date: newDate,
     }),
   });
@@ -79,6 +81,7 @@ export async function explainMoveProject(
   project: ScheduleProject,
   solutionId: string,
   courseCode: string,
+  moedNumber: number,
   newDate: string,
 ): Promise<ExplainMoveResponse> {
   const response = await fetch(`${API_BASE}/projects/explain-move`, {
@@ -90,6 +93,7 @@ export async function explainMoveProject(
       project,
       solution_id: solutionId,
       course_code: courseCode,
+      moed_number: moedNumber,
       new_date: newDate,
     }),
   });
@@ -121,4 +125,15 @@ export async function importCoursesSpreadsheet(file: File): Promise<CourseImport
   }
 
   return response.json();
+}
+
+
+export async function downloadCourseTemplate(): Promise<Blob> {
+  const response = await fetch(`${API_BASE}/projects/import-courses/template`);
+
+  if (!response.ok) {
+    throw new Error("Course template download failed.");
+  }
+
+  return response.blob();
 }

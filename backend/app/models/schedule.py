@@ -1,11 +1,12 @@
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, timedelta
 from typing import Literal
 
 from pydantic import AliasChoices, BaseModel, Field, field_validator, model_validator
 
 IssueSeverity = Literal["error", "warning"]
+DepartmentCode = Literal["SW", "IS"]
 IssueCode = Literal[
     "invalid_window",
     "excluded_outside_window",
@@ -32,6 +33,13 @@ class DateRange(BaseModel):
 
 class ExcludedDateRange(DateRange):
     reason: str = Field(min_length=1, max_length=120)
+
+
+class MoedWindow(DateRange):
+    moed_number: int = Field(default=1, ge=1, le=3)
+    same_semester_gap_days: int = Field(default=3, ge=1, le=30)
+    prerequisite_gap_days: int = Field(default=3, ge=1, le=30)
+    high_failure_gap_days: int = Field(default=3, ge=1, le=30)
 
 
 def normalize_prerequisite_course_codes(value: object) -> list[str]:
@@ -80,10 +88,24 @@ class CourseInput(BaseModel):
     course_name: str = Field(min_length=1, max_length=160)
     semester_number: int = Field(ge=1, le=12)
     high_failure_rate: bool = False
+    department: DepartmentCode | None = None
     prerequisite_course_codes: list[str] = Field(
         default_factory=list,
         validation_alias=AliasChoices("prerequisite_course_codes", "prerequisite_course_code"),
     )
+
+    @field_validator("department", mode="before")
+    @classmethod
+    def normalize_department(cls, value: object) -> DepartmentCode | None:
+        if value is None:
+            return None
+
+        text = str(value).strip().upper()
+        if not text:
+            return None
+        if text in {"SW", "IS"}:
+            return text
+        raise ValueError("Department must be empty, SW, or IS.")
 
     @field_validator("prerequisite_course_codes", mode="before")
     @classmethod
@@ -93,6 +115,7 @@ class CourseInput(BaseModel):
 
 class ScheduledExam(BaseModel):
     course_code: str
+    moed_number: int = Field(default=1, ge=1, le=3)
     exam_date: date
     source: Literal["solver", "fixed", "manual"] = "solver"
 
@@ -110,6 +133,13 @@ class ConstraintConfig(BaseModel):
     adjacent_semester_gap_days: int = Field(default=2, ge=1, le=30)
     prerequisite_gap_days: int = Field(default=3, ge=1, le=30)
     high_failure_gap_days: int = Field(default=3, ge=1, le=30)
+    global_spacing_weight: int = Field(default=4, ge=0, le=50)
+
+
+class SolutionDiagnostics(BaseModel):
+    target_gap_days: int = Field(default=1, ge=1)
+    spacing_deviation: int = Field(default=0, ge=0)
+    spacing_score: int = 0
 
 
 class ScheduleSolution(BaseModel):
@@ -117,17 +147,88 @@ class ScheduleSolution(BaseModel):
     score: int = 0
     exams: list[ScheduledExam] = Field(default_factory=list)
     issues: list[ValidationIssue] = Field(default_factory=list)
+    diagnostics: SolutionDiagnostics = Field(default_factory=SolutionDiagnostics)
 
 
 class ScheduleProject(BaseModel):
     project_name: str = Field(min_length=1, max_length=120)
-    moed_a_window: DateRange
+    moed_windows: list[MoedWindow] = Field(
+        default_factory=lambda: [MoedWindow(start_date=date(2026, 6, 15), end_date=date(2026, 7, 15), moed_number=1)],
+        min_length=1,
+        max_length=3,
+        validation_alias=AliasChoices("moed_windows", "moed_a_window"),
+    )
     constraint_config: ConstraintConfig = Field(default_factory=ConstraintConfig)
     excluded_ranges: list[ExcludedDateRange] = Field(default_factory=list)
     fixed_exams: list[FixedExam] = Field(default_factory=list)
     courses: list[CourseInput] = Field(default_factory=list)
     solutions: list[ScheduleSolution] = Field(default_factory=list)
     issues: list[ValidationIssue] = Field(default_factory=list)
+
+    @field_validator("moed_windows", mode="before")
+    @classmethod
+    def normalize_moed_windows(cls, value: object) -> list[object]:
+        if value is None:
+            return value
+
+        if isinstance(value, dict):
+            return [
+                {
+                    **value,
+                    "moed_number": 1,
+                    "same_semester_gap_days": value.get("same_semester_gap_days", 3),
+                    "prerequisite_gap_days": value.get("prerequisite_gap_days", 3),
+                    "high_failure_gap_days": value.get("high_failure_gap_days", 3),
+                }
+            ]
+
+        normalized_value = list(value) if isinstance(value, list) else [value]
+        normalized_windows: list[object] = []
+        for index, raw_window in enumerate(normalized_value, start=1):
+            if isinstance(raw_window, MoedWindow):
+                normalized_windows.append(raw_window.model_copy(update={"moed_number": index}))
+            elif isinstance(raw_window, DateRange):
+                normalized_windows.append(
+                    {
+                        "start_date": raw_window.start_date,
+                        "end_date": raw_window.end_date,
+                        "moed_number": index,
+                        "same_semester_gap_days": 3,
+                        "prerequisite_gap_days": 3,
+                        "high_failure_gap_days": 3,
+                    }
+                )
+            elif isinstance(raw_window, dict):
+                normalized_windows.append(
+                    {
+                        **raw_window,
+                        "moed_number": index,
+                        "same_semester_gap_days": raw_window.get("same_semester_gap_days", 3),
+                        "prerequisite_gap_days": raw_window.get("prerequisite_gap_days", 3),
+                        "high_failure_gap_days": raw_window.get("high_failure_gap_days", 3),
+                    }
+                )
+            else:
+                normalized_windows.append(raw_window)
+
+        return normalized_windows
+
+    @model_validator(mode="after")
+    def validate_moed_windows(self) -> "ScheduleProject":
+        sorted_windows = sorted(self.moed_windows, key=lambda window: (window.start_date, window.end_date))
+        normalized_windows: list[MoedWindow] = []
+
+        for index, window in enumerate(sorted_windows, start=1):
+            normalized_windows.append(window.model_copy(update={"moed_number": index}))
+
+        for index, window in enumerate(normalized_windows[:-1]):
+            next_window = normalized_windows[index + 1]
+            required_next_start = window.end_date + timedelta(days=1)
+            if next_window.start_date < required_next_start:
+                raise ValueError("Moed windows cannot overlap.")
+
+        self.moed_windows = normalized_windows
+        return self
 
 
 class SolveRequest(BaseModel):
@@ -139,6 +240,7 @@ class ManualMoveRequest(BaseModel):
     project: ScheduleProject
     solution_id: str
     course_code: str
+    moed_number: int = Field(default=1, ge=1, le=3)
     new_date: date
 
 

@@ -1,7 +1,8 @@
 from fastapi import APIRouter, File, HTTPException, UploadFile
+from fastapi.responses import Response
 
 from app.models.schedule import CourseImportResponse, ManualMoveRequest, ScheduleProject, SolveRequest, ValidationIssue
-from app.services.course_import import CourseImportError, import_courses_from_excel
+from app.services.course_import import CourseImportError, export_course_template_excel, import_courses_from_excel
 from app.services.solver import solve_project
 from app.services.validation import explain_manual_move, validate_manual_move, validate_project
 
@@ -49,3 +50,13 @@ async def import_project_courses(file: UploadFile = File(...)) -> CourseImportRe
         return import_courses_from_excel(content)
     except CourseImportError as error:
         raise HTTPException(status_code=422, detail=[issue.model_dump(mode="json") for issue in error.issues]) from error
+
+
+@router.get("/projects/import-courses/template")
+def download_course_template() -> Response:
+    content = export_course_template_excel()
+    return Response(
+        content=content,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": 'attachment; filename="course-import-template.xlsx"'},
+    )

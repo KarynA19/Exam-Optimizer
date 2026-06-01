@@ -8,6 +8,8 @@ from app.services.solver import solve_project
 from app.models.schedule import ManualMoveRequest
 from app.services.validation import (
     explain_manual_move,
+    ideal_gap_target_days,
+    iter_allowed_dates,
     pair_requires_prerequisite_gap,
     score_solution,
     validate_manual_move,
@@ -156,6 +158,38 @@ def test_solve_project_enforces_gap_between_adjacent_semesters() -> None:
     assert abs((date.fromisoformat(exams_by_code["SEM5"]) - date.fromisoformat(exams_by_code["SEM6"])).days) >= 2
 
 
+def test_solve_project_allows_same_day_for_separate_departments() -> None:
+    project = ScheduleProject(
+        project_name="Department split same day",
+        moed_a_window=DateRange(start_date="2026-06-01", end_date="2026-06-01"),
+        courses=[
+            CourseInput(course_code="SW1", course_name="Software 1", semester_number=5, department="SW"),
+            CourseInput(course_code="IS1", course_name="Information Systems 1", semester_number=6, department="IS"),
+        ],
+    )
+
+    result = solve_project(SolveRequest(project=project, max_solutions=1))
+
+    assert result["issues"] == []
+    assert [exam["exam_date"] for exam in result["solutions"][0]["exams"]] == ["2026-06-01", "2026-06-01"]
+
+
+def test_solve_project_treats_blank_department_as_shared_for_gap_constraints() -> None:
+    project = ScheduleProject(
+        project_name="Shared department gap",
+        moed_a_window=DateRange(start_date="2026-06-01", end_date="2026-06-02"),
+        courses=[
+            CourseInput(course_code="ALL1", course_name="Shared Course", semester_number=5),
+            CourseInput(course_code="SW1", course_name="Software 1", semester_number=6, department="SW"),
+        ],
+    )
+
+    result = solve_project(SolveRequest(project=project, max_solutions=1))
+
+    assert result["solutions"] == []
+    assert any(issue["code"] == "no_feasible_schedule" for issue in result["issues"])
+
+
 def test_solve_project_never_uses_saturday_dates() -> None:
     project = ScheduleProject(
         project_name="Saturday blocked",
@@ -185,6 +219,55 @@ def test_solve_project_prefers_non_friday_dates_when_feasible() -> None:
 
     assert result["issues"] == []
     assert result["solutions"][0]["exams"][0]["exam_date"] != "2026-06-05"
+
+
+def test_solve_project_allows_one_friday_per_department() -> None:
+    project = ScheduleProject(
+        project_name="Friday per department",
+        moed_a_window=DateRange(start_date="2026-06-05", end_date="2026-06-05"),
+        courses=[
+            CourseInput(course_code="SW1", course_name="Software 1", semester_number=1, department="SW"),
+            CourseInput(course_code="IS1", course_name="Information Systems 1", semester_number=1, department="IS"),
+        ],
+    )
+
+    result = solve_project(SolveRequest(project=project, max_solutions=1))
+
+    assert result["issues"] == []
+    assert len(result["solutions"]) == 1
+    assert [exam["exam_date"] for exam in result["solutions"][0]["exams"]] == ["2026-06-05", "2026-06-05"]
+
+
+def test_solve_project_blocks_second_friday_for_same_department() -> None:
+    project = ScheduleProject(
+        project_name="Friday same department blocked",
+        moed_a_window=DateRange(start_date="2026-06-05", end_date="2026-06-05"),
+        courses=[
+            CourseInput(course_code="SW1", course_name="Software 1", semester_number=1, department="SW"),
+            CourseInput(course_code="SW2", course_name="Software 2", semester_number=3, department="SW"),
+        ],
+    )
+
+    result = solve_project(SolveRequest(project=project, max_solutions=1))
+
+    assert result["solutions"] == []
+    assert any(issue["code"] == "no_feasible_schedule" for issue in result["issues"])
+
+
+def test_solve_project_blocks_second_friday_when_shared_department_course_uses_it() -> None:
+    project = ScheduleProject(
+        project_name="Friday shared course blocks departments",
+        moed_a_window=DateRange(start_date="2026-06-05", end_date="2026-06-05"),
+        courses=[
+            CourseInput(course_code="ALL1", course_name="Shared Course", semester_number=1),
+            CourseInput(course_code="SW1", course_name="Software 1", semester_number=3, department="SW"),
+        ],
+    )
+
+    result = solve_project(SolveRequest(project=project, max_solutions=1))
+
+    assert result["solutions"] == []
+    assert any(issue["code"] == "no_feasible_schedule" for issue in result["issues"])
 
 
 def test_validate_solution_exams_rejects_adjacent_semesters_with_less_than_two_day_gap() -> None:
@@ -227,6 +310,48 @@ def test_validate_solution_exams_rejects_saturday_exam() -> None:
     assert any("cannot be placed on Saturdays" in issue.message for issue in issues)
 
 
+def test_validate_solution_exams_rejects_multiple_fridays_for_same_department() -> None:
+    project = ScheduleProject(
+        project_name="Friday validation by department",
+        moed_a_window=DateRange(start_date="2026-06-01", end_date="2026-06-15"),
+        courses=[
+            CourseInput(course_code="SW1", course_name="Software 1", semester_number=1, department="SW"),
+            CourseInput(course_code="SW2", course_name="Software 2", semester_number=3, department="SW"),
+        ],
+    )
+
+    issues = validate_solution_exams(
+        project,
+        [
+            ScheduledExam(course_code="SW1", exam_date="2026-06-05", source="solver"),
+            ScheduledExam(course_code="SW2", exam_date="2026-06-12", source="solver"),
+        ],
+    )
+
+    assert any("Department SW can have at most one Friday exam" in issue.message for issue in issues)
+
+
+def test_validate_solution_exams_counts_blank_department_as_both_on_friday() -> None:
+    project = ScheduleProject(
+        project_name="Friday validation shared department",
+        moed_a_window=DateRange(start_date="2026-06-01", end_date="2026-06-15"),
+        courses=[
+            CourseInput(course_code="ALL1", course_name="Shared Course", semester_number=1),
+            CourseInput(course_code="IS1", course_name="Information Systems 1", semester_number=3, department="IS"),
+        ],
+    )
+
+    issues = validate_solution_exams(
+        project,
+        [
+            ScheduledExam(course_code="ALL1", exam_date="2026-06-05", source="solver"),
+            ScheduledExam(course_code="IS1", exam_date="2026-06-12", source="solver"),
+        ],
+    )
+
+    assert any("Department IS can have at most one Friday exam" in issue.message for issue in issues)
+
+
 def test_score_solution_penalizes_friday_and_prefers_interleaved_same_semester_gaps() -> None:
     project = ScheduleProject(
         project_name="Scoring preferences",
@@ -262,6 +387,100 @@ def test_score_solution_penalizes_friday_and_prefers_interleaved_same_semester_g
     assert score_solution(project, interleaved_schedule) > score_solution(project, clustered_schedule)
 
 
+def test_ideal_gap_target_uses_constrained_subset() -> None:
+    project = ScheduleProject(
+        project_name="Ideal gap month",
+        moed_a_window=DateRange(start_date="2026-06-01", end_date="2026-06-12"),
+        courses=[
+            CourseInput(course_code="S1A", course_name="Semester 1 A", semester_number=1),
+            CourseInput(course_code="S1B", course_name="Semester 1 B", semester_number=1),
+            CourseInput(course_code="FREE", course_name="Independent Course", semester_number=8, department="IS"),
+        ],
+    )
+
+    assert ideal_gap_target_days(project) == 5
+
+
+def test_score_solution_prefers_gaps_closer_to_ideal_for_constrained_pairs() -> None:
+    project = ScheduleProject(
+        project_name="Ideal gap scoring",
+        moed_a_window=DateRange(start_date="2026-06-01", end_date="2026-06-12"),
+        courses=[
+            CourseInput(course_code="S1A", course_name="Semester 1 A", semester_number=1),
+            CourseInput(course_code="S1B", course_name="Semester 1 B", semester_number=1),
+            CourseInput(course_code="FREE", course_name="Independent Course", semester_number=8, department="IS"),
+        ],
+    )
+
+    near_ideal_schedule = [
+        ScheduledExam(course_code="S1A", exam_date="2026-06-01", source="solver"),
+        ScheduledExam(course_code="FREE", exam_date="2026-06-06", source="solver"),
+        ScheduledExam(course_code="S1B", exam_date="2026-06-11", source="solver"),
+    ]
+    far_from_ideal_schedule = [
+        ScheduledExam(course_code="S1A", exam_date="2026-06-01", source="solver"),
+        ScheduledExam(course_code="FREE", exam_date="2026-06-02", source="solver"),
+        ScheduledExam(course_code="S1B", exam_date="2026-06-05", source="solver"),
+    ]
+
+    assert score_solution(project, near_ideal_schedule) > score_solution(project, far_from_ideal_schedule)
+
+
+def test_solve_project_prefers_solution_closer_to_ideal_gap() -> None:
+    project = ScheduleProject(
+        project_name="Ideal gap solver preference",
+        moed_a_window=DateRange(start_date="2026-06-01", end_date="2026-06-12"),
+        courses=[
+            CourseInput(course_code="S1A", course_name="Semester 1 A", semester_number=1),
+            CourseInput(course_code="S1B", course_name="Semester 1 B", semester_number=1),
+            CourseInput(course_code="FREE", course_name="Independent Course", semester_number=8, department="IS"),
+        ],
+    )
+
+    result = solve_project(SolveRequest(project=project, max_solutions=1))
+
+    assert result["issues"] == []
+    scheduled_dates = [date.fromisoformat(exam["exam_date"]) for exam in result["solutions"][0]["exams"]]
+    scheduled_dates.sort()
+    assert (scheduled_dates[-1] - scheduled_dates[0]).days >= 9
+
+
+def test_solve_project_uses_last_week_of_month_window() -> None:
+    project = ScheduleProject(
+        project_name="Month window spread",
+        moed_a_window=DateRange(start_date="2026-06-01", end_date="2026-06-30"),
+        courses=[
+            CourseInput(course_code="SW1", course_name="Software 1", semester_number=1, department="SW"),
+            CourseInput(course_code="IS1", course_name="Information Systems 1", semester_number=3, department="IS"),
+            CourseInput(course_code="SW2", course_name="Software 2", semester_number=5, department="SW"),
+            CourseInput(course_code="IS2", course_name="Information Systems 2", semester_number=7, department="IS"),
+            CourseInput(course_code="ALL1", course_name="Shared 1", semester_number=2),
+            CourseInput(course_code="ALL2", course_name="Shared 2", semester_number=4),
+        ],
+    )
+
+    result = solve_project(SolveRequest(project=project, max_solutions=1))
+
+    assert result["issues"] == []
+    latest_exam = max(date.fromisoformat(exam["exam_date"]) for exam in result["solutions"][0]["exams"])
+    assert latest_exam >= date(2026, 6, 24)
+
+
+def test_iter_allowed_dates_supports_multiple_moed_windows() -> None:
+    project = ScheduleProject(
+        project_name="Multiple moeds",
+        moed_windows=[
+            {"start_date": "2026-06-01", "end_date": "2026-06-02"},
+            {"start_date": "2026-06-10", "end_date": "2026-06-11"},
+        ],
+        excluded_ranges=[
+            ExcludedDateRange(start_date="2026-06-10", end_date="2026-06-10", reason="Holiday"),
+        ],
+    )
+
+    assert iter_allowed_dates(project) == [date(2026, 6, 1), date(2026, 6, 2), date(2026, 6, 11)]
+
+
 def test_configurable_high_failure_gap_changes_solver_feasibility() -> None:
     project = ScheduleProject(
         project_name="High failure configurable",
@@ -273,15 +492,19 @@ def test_configurable_high_failure_gap_changes_solver_feasibility() -> None:
     )
 
     default_result = solve_project(SolveRequest(project=project, max_solutions=2))
-    relaxed_project = project.model_copy(
-        update={
-            "constraint_config": ConstraintConfig(
-                same_semester_gap_days=3,
-                adjacent_semester_gap_days=2,
-                prerequisite_gap_days=3,
-                high_failure_gap_days=2,
-            )
-        }
+    relaxed_project = ScheduleProject(
+        project_name=project.project_name,
+        moed_windows=[
+            {
+                "start_date": "2026-06-01",
+                "end_date": "2026-06-03",
+                "same_semester_gap_days": 3,
+                "prerequisite_gap_days": 3,
+                "high_failure_gap_days": 2,
+            }
+        ],
+        courses=project.courses,
+        constraint_config=project.constraint_config,
     )
     relaxed_result = solve_project(SolveRequest(project=relaxed_project, max_solutions=2))
 

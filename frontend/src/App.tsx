@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 
-import { explainMoveProject, importCoursesSpreadsheet, manualMoveProject, solveProject, validateProject } from "./api";
+import { downloadCourseTemplate, explainMoveProject, importCoursesSpreadsheet, manualMoveProject, solveProject, validateProject } from "./api";
 import { EditableSimpleList } from "./components/common/EditableSimpleList";
 import { IssueList } from "./components/common/IssueList";
 import { SectionTitle } from "./components/common/SectionTitle";
@@ -19,6 +19,7 @@ import type {
   CourseImportResponse,
   ExcludedDateRange,
   FixedExam,
+  MoedWindow,
   SavedSetupEntry,
   SavedSetupLibrary,
   ScheduleProject,
@@ -52,7 +53,7 @@ const SETUP_STEPS: Array<{ id: SetupStep; title: string; subtitle: string }> = [
   {
     id: "project",
     title: "Initial Setup",
-    subtitle: "Define the Moed A window, project name, and scheduling gaps.",
+    subtitle: "Define 1-3 Moed windows, their date ranges and gaps, then set the scheduling rules.",
   },
   {
     id: "excluded",
@@ -70,6 +71,56 @@ const SETUP_STEPS: Array<{ id: SetupStep; title: string; subtitle: string }> = [
     subtitle: "Add courses manually or replace the current list from the Excel template.",
   },
 ];
+
+function addDays(dateText: string, days: number) {
+  const nextDate = new Date(`${dateText}T00:00:00`);
+  nextDate.setDate(nextDate.getDate() + days);
+  return nextDate.toISOString().slice(0, 10);
+}
+
+function getMoedLabel(moedNumber: number) {
+  return `Moed ${String.fromCharCode(64 + moedNumber)}`;
+}
+
+function formatMoedWindowSummary(windows: MoedWindow[]) {
+  return windows
+    .map((window) => {
+      return `${getMoedLabel(window.moed_number)}: ${window.start_date} to ${window.end_date}`;
+    })
+    .join(" | ");
+}
+
+function buildMoedWindows(targetCount: number, currentWindows: MoedWindow[]) {
+  const emptyWindow = createEmptyProject().moed_windows[0];
+  const nextWindows: MoedWindow[] = [];
+
+  for (let index = 0; index < targetCount; index += 1) {
+    const existingWindow = currentWindows[index];
+    if (existingWindow) {
+      nextWindows.push({ ...existingWindow, moed_number: index + 1 });
+      continue;
+    }
+
+    const previousWindow = nextWindows[index - 1];
+    if (!previousWindow) {
+      nextWindows.push({ ...emptyWindow, moed_number: 1 });
+      continue;
+    }
+
+    const nextStart = addDays(previousWindow.end_date, 1);
+    const previousDuration = Math.max(0, Math.round((new Date(`${previousWindow.end_date}T00:00:00`).getTime() - new Date(`${previousWindow.start_date}T00:00:00`).getTime()) / (24 * 60 * 60 * 1000)));
+    nextWindows.push({
+      moed_number: index + 1,
+      start_date: nextStart,
+      end_date: addDays(nextStart, previousDuration),
+      same_semester_gap_days: previousWindow.same_semester_gap_days,
+      prerequisite_gap_days: previousWindow.prerequisite_gap_days,
+      high_failure_gap_days: previousWindow.high_failure_gap_days,
+    });
+  }
+
+  return nextWindows;
+}
 
 function App() {
   const initialLocation = readRouteFromLocation();
@@ -89,6 +140,8 @@ function App() {
   const [previewResponses, setPreviewResponses] = useState<Record<string, PreviewResponse>>({});
   const [previewLoading, setPreviewLoading] = useState(false);
   const [showChanges, setShowChanges] = useState(false);
+  const [calendarDepartmentFilter, setCalendarDepartmentFilter] = useState<"all" | "sw" | "is">("all");
+  const [selectedCalendarMoedNumber, setSelectedCalendarMoedNumber] = useState<number>(1);
   const [graphFocusCourseCode, setGraphFocusCourseCode] = useState<string | null>(null);
   const [activeWorkspaceTab, setActiveWorkspaceTab] = useState<"calendar" | "compare" | "graph">("calendar");
   const [activeRoute, setActiveRoute] = useState<AppRoute>(initialLocation.route);
@@ -98,17 +151,18 @@ function App() {
   const [selectedCourseFileName, setSelectedCourseFileName] = useState<string>("");
   const [coursesListCollapsed, setCoursesListCollapsed] = useState(false);
   const [selectedConflictKey, setSelectedConflictKey] = useState<string | null>(null);
+  const [showSolveSuccessModal, setShowSolveSuccessModal] = useState(false);
   const courseImportInputRef = useRef<HTMLInputElement | null>(null);
   const setupSectionRefs = useRef<Partial<Record<SetupStep, HTMLElement | null>>>({});
 
   const courseNameByCode = Object.fromEntries(project.courses.map((course) => [course.course_code, course.course_name]));
   const courseByCode = Object.fromEntries(project.courses.map((course) => [course.course_code, course]));
-  const calendarDays = buildCalendarDays(project);
+  const calendarDays = buildCalendarDays(project, selectedCalendarMoedNumber);
   const calendarDayKey = calendarDays.join("|");
   const semesterRows = Array.from(new Set(project.courses.map((course) => course.semester_number))).sort((left, right) => left - right);
   const activeSolution = project.solutions.find((solution) => solution.solution_id === selectedSolutionId) ?? project.solutions[0] ?? null;
   const selectedExam = activeSolution && selectedExamKey
-    ? activeSolution.exams.find((exam) => getExamMoveKey(activeSolution.solution_id, exam.course_code) === selectedExamKey) ?? null
+    ? activeSolution.exams.find((exam) => getExamMoveKey(activeSolution.solution_id, exam.course_code, exam.moed_number) === selectedExamKey) ?? null
     : null;
   const selectedCourse = selectedExam ? courseByCode[selectedExam.course_code] : null;
   const dependencyEdges = buildDependencyEdges(project);
@@ -168,6 +222,21 @@ function App() {
   }, [project.solutions, selectedSolutionId]);
 
   useEffect(() => {
+    const availableMoedNumbers = project.moed_windows.map((window) => window.moed_number);
+    if (!availableMoedNumbers.includes(selectedCalendarMoedNumber)) {
+      setSelectedCalendarMoedNumber(availableMoedNumbers[0] ?? 1);
+    }
+  }, [project.moed_windows, selectedCalendarMoedNumber]);
+
+  useEffect(() => {
+    if (selectedExam && selectedExam.moed_number !== selectedCalendarMoedNumber) {
+      setSelectedExamKey(null);
+      setSelectedPreviewDate(null);
+      setSelectedConflictKey(null);
+    }
+  }, [selectedCalendarMoedNumber, selectedExam]);
+
+  useEffect(() => {
     setPreviewResponses({});
   }, [selectedSolutionId, selectedExamKey, project.solutions]);
 
@@ -186,8 +255,8 @@ function App() {
 
     Promise.all(
       calendarDays.map(async (dateText) => {
-        const previewKey = getPreviewKey(activeSolution.solution_id, selectedExam.course_code, dateText);
-        const response = await explainMoveProject(project, activeSolution.solution_id, selectedExam.course_code, dateText);
+        const previewKey = getPreviewKey(activeSolution.solution_id, selectedExam.course_code, selectedExam.moed_number, dateText);
+        const response = await explainMoveProject(project, activeSolution.solution_id, selectedExam.course_code, selectedExam.moed_number, dateText);
         return [previewKey, response] as const;
       }),
     )
@@ -218,14 +287,14 @@ function App() {
   }
 
   function buildSavedSetupEntry(): SavedSetupEntry {
-    const startYear = Number(project.moed_a_window.start_date.slice(0, 4));
+    const startYear = Number(project.moed_windows[0]?.start_date.slice(0, 4));
     const savedAt = new Date().toISOString();
 
     return {
       entry_id: project.setup_entry_id ?? `setup-${savedAt}`,
       year: Number.isFinite(startYear) ? startYear : new Date().getFullYear(),
       project_name: project.project_name,
-      moed_a_window: { ...project.moed_a_window },
+      moed_windows: project.moed_windows.map((window) => ({ ...window })),
       constraint_config: { ...project.constraint_config },
       saved_at: savedAt,
     };
@@ -253,7 +322,7 @@ function App() {
     setProject({
       ...emptyProject,
       project_name: entry.project_name,
-      moed_a_window: { ...entry.moed_a_window },
+      moed_windows: entry.moed_windows.map((window) => ({ ...window })),
       constraint_config: { ...entry.constraint_config },
       setup_entry_id: entry.entry_id,
       initial_setup_saved_at: entry.saved_at,
@@ -424,6 +493,26 @@ function App() {
     }
   }
 
+  async function handleCourseTemplateDownload() {
+    setStatus("Downloading course template...");
+
+    try {
+      const blob = await downloadCourseTemplate();
+      const objectUrl = window.URL.createObjectURL(blob);
+      const link = document.createElement("a");
+
+      link.href = objectUrl;
+      link.download = "course-import-template.xlsx";
+      document.body.append(link);
+      link.click();
+      link.remove();
+      window.URL.revokeObjectURL(objectUrl);
+      setStatus("Course template downloaded.");
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : "Course template download failed.");
+    }
+  }
+
   async function handleValidate() {
     setBusyAction("validate");
     setStatus("Checking project rules...");
@@ -447,21 +536,32 @@ function App() {
     setStatus("Generating schedule options...");
     try {
       const solved = await solveProject(project);
+      const solveIssues = solved.issues as ValidationIssue[];
       const nextSolutions = (solved.solutions as ScheduleProject["solutions"]).map((solution) => ({
         ...solution,
         original_exams: solution.original_exams ?? solution.exams.map((exam) => ({ ...exam })),
         original_score: solution.original_score ?? solution.score,
+        original_diagnostics: solution.original_diagnostics ?? solution.diagnostics,
       }));
 
       setProject((current) => ({
         ...current,
         solutions: nextSolutions,
-        issues: solved.issues as ValidationIssue[],
+        issues: solveIssues,
       }));
+
+      if (nextSolutions.length === 0) {
+        setShowSolveSuccessModal(false);
+        setStatus(solveIssues[0]?.message ?? "No feasible solution was found.");
+        return;
+      }
+
       setSelectedSolutionId(nextSolutions[0]?.solution_id ?? null);
       setSelectedExamKey(null);
       setGraphFocusCourseCode(null);
-      setStatus("Solver response received.");
+      navigateTo("/schedule");
+      setShowSolveSuccessModal(nextSolutions.length > 0);
+      setStatus(`Generated ${nextSolutions.length} schedule option${nextSolutions.length === 1 ? "" : "s"}.`);
     } catch (error) {
       setStatus(error instanceof Error ? error.message : "Solve failed.");
     } finally {
@@ -470,7 +570,7 @@ function App() {
   }
 
   async function handleManualMove(solution: ScheduleSolution, exam: ScheduledExam, explicitDate?: string) {
-    const moveKey = getExamMoveKey(solution.solution_id, exam.course_code);
+    const moveKey = getExamMoveKey(solution.solution_id, exam.course_code, exam.moed_number);
     const newDate = explicitDate ?? moveDrafts[moveKey] ?? exam.exam_date;
 
     if (newDate === exam.exam_date) {
@@ -483,7 +583,7 @@ function App() {
     setStatus(`Validating manual move for ${exam.course_code}...`);
 
     try {
-      const response = await manualMoveProject(project, solution.solution_id, exam.course_code, newDate);
+      const response = await manualMoveProject(project, solution.solution_id, exam.course_code, exam.moed_number, newDate);
 
       setProject((current) => ({
         ...current,
@@ -494,6 +594,7 @@ function App() {
 
           const preservedOriginalExams = currentSolution.original_exams ?? currentSolution.exams.map((currentExam) => ({ ...currentExam }));
           const preservedOriginalScore = currentSolution.original_score ?? currentSolution.score;
+          const preservedOriginalDiagnostics = currentSolution.original_diagnostics ?? currentSolution.diagnostics;
 
           if (response.valid && response.updated_solution) {
             return {
@@ -502,6 +603,7 @@ function App() {
               issues: response.issues,
               original_exams: preservedOriginalExams,
               original_score: preservedOriginalScore,
+              original_diagnostics: preservedOriginalDiagnostics,
             };
           }
 
@@ -510,6 +612,7 @@ function App() {
             issues: response.issues,
             original_exams: preservedOriginalExams,
             original_score: preservedOriginalScore,
+            original_diagnostics: preservedOriginalDiagnostics,
           };
         }),
       }));
@@ -544,6 +647,7 @@ function App() {
           ...solution,
           exams: solution.original_exams.map((exam) => ({ ...exam })),
           score: solution.original_score ?? solution.score,
+          diagnostics: solution.original_diagnostics ?? solution.diagnostics,
           issues: [],
         };
       }),
@@ -554,13 +658,16 @@ function App() {
   }
 
   const previewResponse = activeSolution && selectedExam && selectedPreviewDate
-    ? previewResponses[getPreviewKey(activeSolution.solution_id, selectedExam.course_code, selectedPreviewDate)]
+    ? previewResponses[getPreviewKey(activeSolution.solution_id, selectedExam.course_code, selectedExam.moed_number, selectedPreviewDate)]
     : undefined;
   const previewStatus = activeSolution && selectedExam && selectedPreviewDate
     ? getPreviewStatus(activeSolution, selectedPreviewDate, selectedExam, previewResponse)
     : "idle";
   const previewIssues = previewResponse?.issues ?? [];
   const activeConflict = previewIssues.find((issue) => getConflictKey(issue) === selectedConflictKey) ?? previewIssues[0] ?? null;
+  const changedCourseCodes = activeSolution
+    ? Array.from(new Set(activeSolution.exams.filter((exam) => hasExamChanged(activeSolution, exam.course_code, exam.moed_number)).map((exam) => exam.course_code)))
+    : [];
 
   useEffect(() => {
     if (previewIssues.length === 0) {
@@ -586,12 +693,23 @@ function App() {
 
     const targetCourseCode = issue.related_course_code ?? selectedExam?.course_code ?? null;
     const targetExam = targetCourseCode
-      ? activeSolution.exams.find((exam) => exam.course_code === targetCourseCode) ?? null
+      ? activeSolution.exams.find((exam) => {
+        if (exam.course_code !== targetCourseCode) {
+          return false;
+        }
+
+        if (issue.related_date) {
+          return exam.exam_date === issue.related_date;
+        }
+
+        return exam.moed_number === selectedCalendarMoedNumber;
+      }) ?? null
       : null;
 
     if (targetExam) {
-      setSelectedExamKey(getExamMoveKey(activeSolution.solution_id, targetExam.course_code));
+      setSelectedExamKey(getExamMoveKey(activeSolution.solution_id, targetExam.course_code, targetExam.moed_number));
       setSelectedPreviewDate(issue.related_date ?? targetExam.exam_date);
+      setSelectedCalendarMoedNumber(targetExam.moed_number);
       setGraphFocusCourseCode(targetExam.course_code);
       return;
     }
@@ -671,7 +789,7 @@ function App() {
                     <div className="saved-entry-summary-header">
                       <div>
                         <strong>{project.project_name}</strong>
-                        <p className="field-hint">Saved under {currentSavedSetup?.year ?? project.moed_a_window.start_date.slice(0, 4)} and ready for the rest of setup.</p>
+                        <p className="field-hint">Saved under {currentSavedSetup?.year ?? project.moed_windows[0]?.start_date.slice(0, 4) ?? "Draft"} and ready for the rest of setup.</p>
                       </div>
                       <div className="row-actions">
                         <button type="button" className="secondary-button" onClick={() => setIsEditingInitialSetup(true)}>
@@ -688,13 +806,13 @@ function App() {
                         <strong>{project.project_name}</strong>
                       </div>
                       <div>
-                        <span>Window</span>
-                        <strong>{project.moed_a_window.start_date} to {project.moed_a_window.end_date}</strong>
+                        <span>Moed windows</span>
+                        <strong>{formatMoedWindowSummary(project.moed_windows)}</strong>
                       </div>
                       <div>
-                        <span>Gaps</span>
+                        <span>Per-Moed gaps</span>
                         <strong>
-                          {project.constraint_config.same_semester_gap_days} / {project.constraint_config.prerequisite_gap_days} / {project.constraint_config.high_failure_gap_days} days
+                          {project.moed_windows.map((window) => `${getMoedLabel(window.moed_number)} ${window.same_semester_gap_days}/${window.prerequisite_gap_days}/${window.high_failure_gap_days}`).join(" | ")}
                         </strong>
                       </div>
                       <div>
@@ -712,84 +830,123 @@ function App() {
                         onChange={(event) => patchProject({ project_name: event.target.value })}
                       />
                     </label>
-                    <div className="field-row compact-field-row">
-                      <label>
-                        <span>Start date</span>
-                        <input
-                          type="date"
-                          value={project.moed_a_window.start_date}
-                          onChange={(event) =>
-                            patchProject({
-                              moed_a_window: { ...project.moed_a_window, start_date: event.target.value },
-                            })
-                          }
-                        />
-                      </label>
-                      <label>
-                        <span>End date</span>
-                        <input
-                          type="date"
-                          value={project.moed_a_window.end_date}
-                          onChange={(event) =>
-                            patchProject({
-                              moed_a_window: { ...project.moed_a_window, end_date: event.target.value },
-                            })
-                          }
-                        />
-                      </label>
-                    </div>
-                    <div className="field-row field-row-triple compact-field-row">
-                      <label>
-                        <span>Same semester gap</span>
-                        <input
-                          type="number"
-                          min="1"
-                          max="30"
-                          value={project.constraint_config.same_semester_gap_days}
-                          onChange={(event) =>
-                            patchProject({
-                              constraint_config: {
-                                ...project.constraint_config,
-                                same_semester_gap_days: Number(event.target.value),
-                              },
-                            })
-                          }
-                        />
-                      </label>
-                      <label>
-                        <span>Prerequisite gap</span>
-                        <input
-                          type="number"
-                          min="1"
-                          max="30"
-                          value={project.constraint_config.prerequisite_gap_days}
-                          onChange={(event) =>
-                            patchProject({
-                              constraint_config: {
-                                ...project.constraint_config,
-                                prerequisite_gap_days: Number(event.target.value),
-                              },
-                            })
-                          }
-                        />
-                      </label>
-                      <label>
-                        <span>High-failure gap</span>
-                        <input
-                          type="number"
-                          min="1"
-                          max="30"
-                          value={project.constraint_config.high_failure_gap_days}
-                          onChange={(event) =>
-                            patchProject({
-                              constraint_config: {
-                                ...project.constraint_config,
-                                high_failure_gap_days: Number(event.target.value),
-                              },
-                            })
-                          }
-                        />
-                      </label>
+                    <label className="compact-number-field moed-count-field">
+                      <span>Moed count</span>
+                      <input
+                        type="number"
+                        min="1"
+                        max="3"
+                        value={project.moed_windows.length}
+                        onChange={(event) =>
+                          patchProject({
+                            moed_windows: buildMoedWindows(Math.min(3, Math.max(1, Number(event.target.value) || 1)), project.moed_windows),
+                          })
+                        }
+                      />
+                    </label>
+                    <div className="moed-window-grid">
+                      {project.moed_windows.map((window, index) => {
+                        const previousWindow = index > 0 ? project.moed_windows[index - 1] : null;
+                        const minimumStartDate = previousWindow ? addDays(previousWindow.end_date, 1) : undefined;
+
+                        return (
+                          <div key={`moed-window-${window.moed_number}`} className="moed-window-card">
+                            <div className="moed-window-header">
+                              <strong>{getMoedLabel(window.moed_number)}</strong>
+                            </div>
+                            <div className="moed-window-fields">
+                              <label className="moed-date-field">
+                                <span>Start date</span>
+                                <input
+                                  type="date"
+                                  min={minimumStartDate}
+                                  value={window.start_date}
+                                  onChange={(event) =>
+                                    patchProject({
+                                      moed_windows: project.moed_windows.map((currentWindow, currentIndex) =>
+                                        currentIndex === index
+                                          ? { ...currentWindow, start_date: event.target.value }
+                                          : currentWindow,
+                                      ),
+                                    })
+                                  }
+                                />
+                              </label>
+                              <label className="moed-date-field">
+                                <span>End date</span>
+                                <input
+                                  type="date"
+                                  min={window.start_date}
+                                  value={window.end_date}
+                                  onChange={(event) =>
+                                    patchProject({
+                                      moed_windows: project.moed_windows.map((currentWindow, currentIndex) =>
+                                        currentIndex === index
+                                          ? { ...currentWindow, end_date: event.target.value }
+                                          : currentWindow,
+                                      ),
+                                    })
+                                  }
+                                />
+                              </label>
+                              <label className="compact-number-field moed-gap-field">
+                                <span>Same semester gap</span>
+                                <input
+                                  type="number"
+                                  min="1"
+                                  max="30"
+                                  value={window.same_semester_gap_days}
+                                  onChange={(event) =>
+                                    patchProject({
+                                      moed_windows: project.moed_windows.map((currentWindow, currentIndex) =>
+                                        currentIndex === index
+                                          ? { ...currentWindow, same_semester_gap_days: Number(event.target.value) }
+                                          : currentWindow,
+                                      ),
+                                    })
+                                  }
+                                />
+                              </label>
+                              <label className="compact-number-field moed-gap-field">
+                                <span>Prerequisite gap</span>
+                                <input
+                                  type="number"
+                                  min="1"
+                                  max="30"
+                                  value={window.prerequisite_gap_days}
+                                  onChange={(event) =>
+                                    patchProject({
+                                      moed_windows: project.moed_windows.map((currentWindow, currentIndex) =>
+                                        currentIndex === index
+                                          ? { ...currentWindow, prerequisite_gap_days: Number(event.target.value) }
+                                          : currentWindow,
+                                      ),
+                                    })
+                                  }
+                                />
+                              </label>
+                              <label className="compact-number-field moed-gap-field">
+                                <span>High-failure gap</span>
+                                <input
+                                  type="number"
+                                  min="1"
+                                  max="30"
+                                  value={window.high_failure_gap_days}
+                                  onChange={(event) =>
+                                    patchProject({
+                                      moed_windows: project.moed_windows.map((currentWindow, currentIndex) =>
+                                        currentIndex === index
+                                          ? { ...currentWindow, high_failure_gap_days: Number(event.target.value) }
+                                          : currentWindow,
+                                      ),
+                                    })
+                                  }
+                                />
+                              </label>
+                            </div>
+                          </div>
+                        );
+                      })}
                     </div>
                     <div className="button-row initial-entry-actions">
                       <button type="button" onClick={handleSaveInitialSetup}>
@@ -871,9 +1028,12 @@ function App() {
                   <div className="file-input-row">
                     <div>
                       <span className="file-input-label">Excel course template</span>
-                      <p className="field-hint">Expected columns: Course ID, Course Name, Semester, Is High Failure, Prerequisites. Import replaces the current course list.</p>
+                      <p className="field-hint">Expected columns: Course ID, Course Name, Semester, Is High Failure, Prerequisites, Department. Import replaces the current course list.</p>
                     </div>
                     <div className="file-input-controls">
+                      <button type="button" className="secondary-button" onClick={() => void handleCourseTemplateDownload()}>
+                        Download template
+                      </button>
                       <input
                         ref={courseImportInputRef}
                         className="file-input-hidden"
@@ -938,6 +1098,7 @@ function App() {
                           <th>Code</th>
                           <th>Name</th>
                           <th>Semester</th>
+                          <th>Department</th>
                           <th>High failure</th>
                           <th>Prerequisite</th>
                           <th>Actions</th>
@@ -946,7 +1107,7 @@ function App() {
                       <tbody>
                         {project.courses.length === 0 ? (
                           <tr>
-                            <td colSpan={6} className="empty-row">
+                            <td colSpan={7} className="empty-row">
                               No courses added yet.
                             </td>
                           </tr>
@@ -956,6 +1117,7 @@ function App() {
                               <td>{course.course_code}</td>
                               <td>{course.course_name}</td>
                               <td>{course.semester_number}</td>
+                              <td>{course.department ?? "All"}</td>
                               <td>{course.high_failure_rate ? "Yes" : "No"}</td>
                               <td>{course.prerequisite_course_codes.length > 0 ? course.prerequisite_course_codes.join(", ") : "-"}</td>
                               <td>
@@ -1006,7 +1168,7 @@ function App() {
               <div className="setup-summary-grid side-summary-grid">
                 <div>
                   <span>Year folder</span>
-                  <strong>{project.moed_a_window.start_date.slice(0, 4)}</strong>
+                  <strong>{project.moed_windows[0]?.start_date.slice(0, 4) ?? "-"}</strong>
                 </div>
                 <div>
                   <span>Saved setups</span>
@@ -1056,7 +1218,7 @@ function App() {
                                 onClick={() => handleUseSavedSetup(entry)}
                               >
                                 <strong>{entry.project_name}</strong>
-                                <span>{entry.moed_a_window.start_date} to {entry.moed_a_window.end_date}</span>
+                                <span>{formatMoedWindowSummary(entry.moed_windows)}</span>
                               </button>
                               <button
                                 type="button"
@@ -1138,13 +1300,48 @@ function App() {
                         ))}
                       </div>
                       <div className="calendar-actions">
+                        <div className="department-filter-group" role="group" aria-label="Calendar Moed picker">
+                          {project.moed_windows.map((window) => (
+                            <button
+                              key={`calendar-moed-${window.moed_number}`}
+                              type="button"
+                              className={selectedCalendarMoedNumber === window.moed_number ? "solution-tab active" : "solution-tab"}
+                              onClick={() => setSelectedCalendarMoedNumber(window.moed_number)}
+                            >
+                              {getMoedLabel(window.moed_number)}
+                            </button>
+                          ))}
+                        </div>
+                        <div className="department-filter-group" role="group" aria-label="Calendar department filter">
+                          <button
+                            type="button"
+                            className={calendarDepartmentFilter === "all" ? "solution-tab active" : "solution-tab"}
+                            onClick={() => setCalendarDepartmentFilter("all")}
+                          >
+                            All
+                          </button>
+                          <button
+                            type="button"
+                            className={[calendarDepartmentFilter === "sw" ? "solution-tab active" : "solution-tab", "department-sw"].join(" ")}
+                            onClick={() => setCalendarDepartmentFilter("sw")}
+                          >
+                            SW
+                          </button>
+                          <button
+                            type="button"
+                            className={[calendarDepartmentFilter === "is" ? "solution-tab active" : "solution-tab", "department-is"].join(" ")}
+                            onClick={() => setCalendarDepartmentFilter("is")}
+                          >
+                            IS
+                          </button>
+                        </div>
                         <button type="button" className="secondary-button" onClick={() => setShowChanges((current) => !current)}>
                           {showChanges ? "Hide changes" : "Show changes"}
                         </button>
                         <button
                           type="button"
                           className="secondary-button"
-                          disabled={!activeSolution.original_exams || !activeSolution.exams.some((exam) => hasExamChanged(activeSolution, exam.course_code))}
+                          disabled={!activeSolution.original_exams || !activeSolution.exams.some((exam) => hasExamChanged(activeSolution, exam.course_code, exam.moed_number))}
                           onClick={() => handleResetSolution(activeSolution.solution_id)}
                         >
                           Reset to optimal
@@ -1157,6 +1354,7 @@ function App() {
                         project={project}
                         solution={activeSolution}
                         calendarDays={calendarDays}
+                        selectedMoedNumber={selectedCalendarMoedNumber}
                         semesterRows={semesterRows}
                         courseNameByCode={courseNameByCode}
                         courseByCode={courseByCode}
@@ -1165,11 +1363,13 @@ function App() {
                         previewResponses={previewResponses}
                         previewLoading={previewLoading}
                         showChanges={showChanges}
+                        departmentFilter={calendarDepartmentFilter}
                         activeConflict={activeConflict}
                         onSelectExam={(exam) => {
                           setSelectedConflictKey(null);
-                          setSelectedExamKey(getExamMoveKey(activeSolution.solution_id, exam.course_code));
+                          setSelectedExamKey(getExamMoveKey(activeSolution.solution_id, exam.course_code, exam.moed_number));
                           setSelectedPreviewDate(exam.exam_date);
+                          setSelectedCalendarMoedNumber(exam.moed_number);
                           setGraphFocusCourseCode(exam.course_code);
                         }}
                         onSelectPreviewDate={(date) => {
@@ -1210,7 +1410,12 @@ function App() {
                 {project.solutions.length === 0 ? (
                   <p className="empty-state">No solutions available for comparison.</p>
                 ) : (
-                  <ComparisonDashboard solutions={project.solutions} activeSolutionId={activeSolution?.solution_id ?? null} onSelectSolution={setSelectedSolutionId} />
+                  <ComparisonDashboard
+                    solutions={project.solutions}
+                    activeSolutionId={activeSolution?.solution_id ?? null}
+                    courseByCode={courseByCode}
+                    onSelectSolution={setSelectedSolutionId}
+                  />
                 )}
               </>
             ) : null}
@@ -1226,7 +1431,7 @@ function App() {
                     solution={activeSolution}
                     edges={dependencyEdges}
                     focusCourseCode={graphFocusCourseCode}
-                    changedCourseCodes={activeSolution ? activeSolution.exams.filter((exam) => hasExamChanged(activeSolution, exam.course_code)).map((exam) => exam.course_code) : []}
+                    changedCourseCodes={changedCourseCodes}
                     onSelectCourse={(courseCode) => setGraphFocusCourseCode(courseCode || null)}
                   />
                 )}
@@ -1246,10 +1451,10 @@ function App() {
               movingExamKey={movingExamKey}
               disabled={busyAction !== null}
               showChanges={showChanges}
-              onDraftChange={(solutionId, courseCode, nextDate) => {
+              onDraftChange={(solutionId, courseCode, moedNumber, nextDate) => {
                 setMoveDrafts((current) => ({
                   ...current,
-                  [getExamMoveKey(solutionId, courseCode)]: nextDate,
+                  [getExamMoveKey(solutionId, courseCode, moedNumber)]: nextDate,
                 }));
               }}
               onMove={handleManualMove}
@@ -1266,6 +1471,29 @@ function App() {
           </>
         ) : null}
       </main>
+
+      {showSolveSuccessModal ? (
+        <div className="app-modal-backdrop" role="presentation" onClick={() => setShowSolveSuccessModal(false)}>
+          <div
+            className="app-modal-panel"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="solve-success-title"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <span className="app-modal-kicker">Generation complete</span>
+            <h2 id="solve-success-title">Schedules are ready</h2>
+            <p>
+              The solver finished successfully and you have been redirected to the schedule workspace to review the generated options.
+            </p>
+            <div className="app-modal-actions">
+              <button type="button" className="accent-button" onClick={() => setShowSolveSuccessModal(false)}>
+                View schedule
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
     </div>
   );
 }
