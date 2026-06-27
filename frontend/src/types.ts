@@ -30,6 +30,7 @@ export type FixedExam = {
   prerequisite_course_codes: string[];
   exam_date: string;
   locked: boolean;
+  department?: CourseDepartment;
   reason?: string | null;
 };
 
@@ -76,6 +77,27 @@ export type SavedSetupEntry = {
 
 export type SavedSetupLibrary = Record<string, SavedSetupEntry[]>;
 
+export type AuthLoginResponse = {
+  token: string;
+  user_id: string;
+};
+
+export type RemoteSavedSetupSummary = {
+  setup_id: string;
+  project_name: string;
+  year: number;
+  saved_at?: string | null;
+  updated_at?: string | null;
+  saved_solution_id?: string | null;
+};
+
+export type RemoteSavedSetupPayload = {
+  metadata: RemoteSavedSetupSummary;
+  project: ScheduleProject;
+};
+
+export type ImportMode = "replace" | "append" | "merge";
+
 export type ScheduleSolution = {
   solution_id: string;
   score: number;
@@ -105,12 +127,15 @@ export type ExplainMoveResponse = ManualMoveResponse;
 export type CourseImportResponse = {
   imported_count: number;
   courses: CourseInput[];
+  fixed_exams_imported_count: number;
+  fixed_exams: FixedExam[];
 };
 
 export type ScheduleProject = {
   project_name: string;
   moed_windows: MoedWindow[];
   constraint_config: ConstraintConfig;
+  remote_setup_id?: string | null;
   setup_entry_id?: string | null;
   initial_setup_saved_at?: string | null;
   excluded_ranges: ExcludedDateRange[];
@@ -139,6 +164,7 @@ export const createEmptyProject = (): ScheduleProject => ({
     high_failure_gap_days: 3,
     global_spacing_weight: 4,
   },
+  remote_setup_id: null,
   setup_entry_id: null,
   initial_setup_saved_at: null,
   excluded_ranges: [],

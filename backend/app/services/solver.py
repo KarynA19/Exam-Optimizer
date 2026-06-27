@@ -14,10 +14,20 @@ from ortools.sat.python import cp_model
 
 from app.models.schedule import MoedWindow, ScheduledExam, ScheduleSolution, SolutionDiagnostics, SolveRequest, ValidationIssue
 from app.services.validation import (
-    ADJACENT_SEMESTER_SAME_DAY_PENALTY,
+    ADJACENT_SEMESTER_NON_PREREQ_SAME_DAY_PENALTY,
+    ADJACENT_SAME_DAY_PAIR_EXCESS_PENALTY,
     DEPARTMENTS,
+    EARLY_EXAM_WEIGHT,
     FRIDAY_EXAM_PENALTY,
     IDEAL_GAP_DEVIATION_WEIGHT,
+    MAX_RECOMMENDED_GAP_DAYS,
+    SAME_PARITY_SAME_DAY_PENALTY,
+    SEMESTER_START_AFTER_WEEK_ONE_PENALTY,
+    SEMESTER_START_SPREAD_PENALTY,
+    SEMESTER_MISSING_FIRST_WEEK_PENALTY,
+    SEMESTER_LATE_START_PENALTY,
+    SEMESTER_SPAN_PENALTY,
+    SAME_SEMESTER_OVER_WEEK_PENALTY,
     SAME_SEMESTER_GAP_WEIGHT,
     build_solution_diagnostics,
     course_departments,
@@ -26,7 +36,6 @@ from app.services.validation import (
     iter_allowed_dates,
     moed_window_for_date,
     pair_requires_high_failure_gap,
-    pair_requires_adjacent_semester_gap,
     pair_requires_prerequisite_gap,
     pair_requires_same_semester_gap,
     pair_prefers_adjacent_semester_spacing,
@@ -37,6 +46,12 @@ from app.services.validation import (
 
 def moed_letter(moed_number: int) -> str:
     return chr(64 + moed_number)
+
+
+def minimum_date_distance_for_free_days(minimum_free_days: int) -> int:
+    if minimum_free_days <= 0:
+        return 0
+    return minimum_free_days + 1
 
 
 def solve_single_moed_project(project, moed_window: MoedWindow, max_solutions: int) -> tuple[list[ScheduleSolution], list[ValidationIssue]]:
@@ -65,6 +80,8 @@ def solve_single_moed_project(project, moed_window: MoedWindow, max_solutions: i
     exam_vars: dict[str, cp_model.IntVar] = {}
     objective_terms: list[cp_model.LinearExpr] = []
     adjacent_semester_same_day_vars: list[cp_model.BoolVar] = []
+    adjacent_semester_non_prereq_same_day_vars: list[cp_model.BoolVar] = []
+    same_parity_same_day_vars: list[cp_model.BoolVar] = []
     friday_exam_vars: dict[str, cp_model.BoolVar] = {}
     scheduled_on_date_vars: dict[tuple[str, int], cp_model.BoolVar] = {}
     cumulative_gap_deviation_vars: list[cp_model.IntVar] = []
@@ -148,7 +165,10 @@ def solve_single_moed_project(project, moed_window: MoedWindow, max_solutions: i
             window_gap = 0
             if pair_requires_same_semester_gap(course, other_course):
                 window_gap = max(window_gap, moed_window.same_semester_gap_days)
-                objective_terms.append(gap_var * (moed_window.same_semester_gap_days * SAME_SEMESTER_GAP_WEIGHT))
+                same_semester_over_week = model.NewBoolVar(f"same_semester_over_week_{course.course_code}_{other_course.course_code}")
+                model.Add(gap_var >= MAX_RECOMMENDED_GAP_DAYS + 2).OnlyEnforceIf(same_semester_over_week)
+                model.Add(gap_var <= MAX_RECOMMENDED_GAP_DAYS + 1).OnlyEnforceIf(same_semester_over_week.Not())
+                objective_terms.append(-SAME_SEMESTER_OVER_WEEK_PENALTY * same_semester_over_week)
             elif pair_requires_prerequisite_gap(course, other_course):
                 window_gap = max(window_gap, moed_window.prerequisite_gap_days)
                 objective_terms.append(gap_var * moed_window.prerequisite_gap_days)
@@ -156,22 +176,117 @@ def solve_single_moed_project(project, moed_window: MoedWindow, max_solutions: i
                 window_gap = max(window_gap, moed_window.high_failure_gap_days)
                 objective_terms.append(gap_var * (moed_window.high_failure_gap_days + 1))
 
-            if pair_requires_adjacent_semester_gap(course, other_course):
-                window_gap = max(window_gap, project.constraint_config.adjacent_semester_gap_days)
-
             if window_gap > 0:
-                model.Add(gap_var >= window_gap)
+                model.Add(gap_var >= minimum_date_distance_for_free_days(window_gap))
 
             if pair_prefers_adjacent_semester_spacing(course, other_course):
                 same_day_var = model.NewBoolVar(f"same_day_{course.course_code}_{other_course.course_code}")
                 model.Add(exam_vars[course.course_code] == exam_vars[other_course.course_code]).OnlyEnforceIf(same_day_var)
                 model.Add(exam_vars[course.course_code] != exam_vars[other_course.course_code]).OnlyEnforceIf(same_day_var.Not())
                 adjacent_semester_same_day_vars.append(same_day_var)
+                if not pair_requires_prerequisite_gap(course, other_course):
+                    adjacent_semester_non_prereq_same_day_vars.append(same_day_var)
+
+            if course.semester_number != other_course.semester_number and course.semester_number % 2 == other_course.semester_number % 2:
+                same_parity_same_day_var = model.NewBoolVar(f"same_parity_same_day_{course.course_code}_{other_course.course_code}")
+                model.Add(exam_vars[course.course_code] == exam_vars[other_course.course_code]).OnlyEnforceIf(same_parity_same_day_var)
+                model.Add(exam_vars[course.course_code] != exam_vars[other_course.course_code]).OnlyEnforceIf(same_parity_same_day_var.Not())
+                same_parity_same_day_vars.append(same_parity_same_day_var)
+
+    fixed_exams_by_prerequisite_code: dict[str, list] = {}
+    for fixed_exam in project.fixed_exams:
+        for prerequisite_code in fixed_exam.prerequisite_course_codes:
+            fixed_exams_by_prerequisite_code.setdefault(prerequisite_code, []).append(fixed_exam)
+
+    minimum_prerequisite_date_distance = minimum_date_distance_for_free_days(moed_window.prerequisite_gap_days)
+    if minimum_prerequisite_date_distance > 0:
+        for course in courses:
+            course_exam_var = exam_vars[course.course_code]
+
+            for prerequisite_code in course.prerequisite_course_codes:
+                prerequisite_fixed_exam = fixed_exam_lookup.get(prerequisite_code)
+                if prerequisite_fixed_exam is None:
+                    continue
+                prerequisite_fixed_exam_ordinal = date_to_ordinal.get(prerequisite_fixed_exam.exam_date)
+                if prerequisite_fixed_exam_ordinal is None:
+                    continue
+
+                gap_to_prerequisite_fixed_exam = model.NewIntVar(
+                    0,
+                    max_ordinal - min_ordinal,
+                    f"gap_to_fixed_prerequisite_{course.course_code}_{prerequisite_code}",
+                )
+                model.AddAbsEquality(gap_to_prerequisite_fixed_exam, course_exam_var - prerequisite_fixed_exam_ordinal)
+                model.Add(gap_to_prerequisite_fixed_exam >= minimum_prerequisite_date_distance)
+
+            for dependent_fixed_exam in fixed_exams_by_prerequisite_code.get(course.course_code, []):
+                dependent_fixed_exam_ordinal = date_to_ordinal.get(dependent_fixed_exam.exam_date)
+                if dependent_fixed_exam_ordinal is None:
+                    continue
+
+                gap_to_dependent_fixed_exam = model.NewIntVar(
+                    0,
+                    max_ordinal - min_ordinal,
+                    f"gap_to_fixed_dependent_{course.course_code}_{dependent_fixed_exam.course_code}",
+                )
+                model.AddAbsEquality(gap_to_dependent_fixed_exam, course_exam_var - dependent_fixed_exam_ordinal)
+                model.Add(gap_to_dependent_fixed_exam >= minimum_prerequisite_date_distance)
+
+    courses_by_semester: dict[int, list[str]] = {}
+    for course in courses:
+        courses_by_semester.setdefault(course.semester_number, []).append(course.course_code)
+
+    semester_earliest_vars: list[cp_model.IntVar] = []
+    for semester_number, semester_course_codes in courses_by_semester.items():
+        if not semester_course_codes:
+            continue
+
+        semester_exam_vars = [exam_vars[course_code] for course_code in semester_course_codes]
+        earliest_exam_var = model.NewIntVar(min_ordinal, max_ordinal, f"semester_{semester_number}_earliest")
+        latest_exam_var = model.NewIntVar(min_ordinal, max_ordinal, f"semester_{semester_number}_latest")
+        span_var = model.NewIntVar(0, max_ordinal - min_ordinal, f"semester_{semester_number}_span")
+
+        model.AddMinEquality(earliest_exam_var, semester_exam_vars)
+        model.AddMaxEquality(latest_exam_var, semester_exam_vars)
+        model.Add(span_var == latest_exam_var - earliest_exam_var)
+        semester_earliest_vars.append(earliest_exam_var)
+
+        objective_terms.append(-SEMESTER_LATE_START_PENALTY * (earliest_exam_var - min_ordinal))
+        objective_terms.append(-SEMESTER_SPAN_PENALTY * span_var)
+
+        starts_after_first_week = model.NewBoolVar(f"semester_{semester_number}_starts_after_first_week")
+        model.Add(earliest_exam_var >= min_ordinal + 7).OnlyEnforceIf(starts_after_first_week)
+        model.Add(earliest_exam_var <= min_ordinal + 6).OnlyEnforceIf(starts_after_first_week.Not())
+        objective_terms.append(-SEMESTER_MISSING_FIRST_WEEK_PENALTY * starts_after_first_week)
+
+        late_after_week_var = model.NewIntVar(0, max_ordinal - min_ordinal, f"semester_{semester_number}_late_after_week")
+        model.AddMaxEquality(late_after_week_var, [0, earliest_exam_var - (min_ordinal + 6)])
+        objective_terms.append(-SEMESTER_START_AFTER_WEEK_ONE_PENALTY * late_after_week_var)
+
+    if len(semester_earliest_vars) > 1:
+        min_semester_start_var = model.NewIntVar(min_ordinal, max_ordinal, "min_semester_start")
+        max_semester_start_var = model.NewIntVar(min_ordinal, max_ordinal, "max_semester_start")
+        semester_start_spread_var = model.NewIntVar(0, max_ordinal - min_ordinal, "semester_start_spread")
+        model.AddMinEquality(min_semester_start_var, semester_earliest_vars)
+        model.AddMaxEquality(max_semester_start_var, semester_earliest_vars)
+        model.Add(semester_start_spread_var == max_semester_start_var - min_semester_start_var)
+        objective_terms.append(-SEMESTER_START_SPREAD_PENALTY * semester_start_spread_var)
 
     if friday_exam_vars:
         objective_terms.append(-FRIDAY_EXAM_PENALTY * sum(friday_exam_vars.values()))
-    if adjacent_semester_same_day_vars:
-        objective_terms.append(-ADJACENT_SEMESTER_SAME_DAY_PENALTY * sum(adjacent_semester_same_day_vars))
+    objective_terms.extend(-EARLY_EXAM_WEIGHT * (exam_vars[course.course_code] - min_ordinal) for course in courses)
+    if adjacent_semester_non_prereq_same_day_vars:
+        objective_terms.append(-ADJACENT_SEMESTER_NON_PREREQ_SAME_DAY_PENALTY * sum(adjacent_semester_non_prereq_same_day_vars))
+    if len(adjacent_semester_same_day_vars) > 1:
+        adjacent_same_day_excess_var = model.NewIntVar(
+            0,
+            len(adjacent_semester_same_day_vars) - 1,
+            "adjacent_same_day_pair_excess",
+        )
+        model.Add(adjacent_same_day_excess_var >= sum(adjacent_semester_same_day_vars) - 1)
+        objective_terms.append(-ADJACENT_SAME_DAY_PAIR_EXCESS_PENALTY * adjacent_same_day_excess_var)
+    if same_parity_same_day_vars:
+        objective_terms.append(-SAME_PARITY_SAME_DAY_PENALTY * sum(same_parity_same_day_vars))
     if cumulative_gap_deviation_vars:
         objective_terms.append(-project.constraint_config.global_spacing_weight * sum(cumulative_gap_deviation_vars))
     if objective_terms:

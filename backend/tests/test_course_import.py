@@ -5,12 +5,23 @@ from openpyxl import Workbook, load_workbook
 from app.services.course_import import CourseImportError, export_course_template_excel, import_courses_from_excel
 
 
-def build_workbook_bytes(rows: list[list[object]], headers: list[str] | None = None) -> bytes:
+def build_workbook_bytes(
+    rows: list[list[object]],
+    headers: list[str] | None = None,
+    fixed_rows: list[list[object]] | None = None,
+    fixed_headers: list[str] | None = None,
+) -> bytes:
     workbook = Workbook()
     worksheet = workbook.active
+    worksheet.title = "Courses"
     worksheet.append(headers or ["Course ID", "Course Name", "Semester", "Is High Failure", "Prerequisites", "Department"])
     for row in rows:
         worksheet.append(row)
+
+    fixed_worksheet = workbook.create_sheet("Fixed Exams")
+    fixed_worksheet.append(fixed_headers or ["Course ID", "Course Name", "Exam Date", "Prerequisites", "Department"])
+    for row in fixed_rows or []:
+        fixed_worksheet.append(row)
 
     buffer = BytesIO()
     workbook.save(buffer)
@@ -33,6 +44,8 @@ def test_import_courses_from_excel_parses_valid_template() -> None:
     assert result.courses[0].department is None
     assert result.courses[1].prerequisite_course_codes == ["ALG1"]
     assert result.courses[1].department == "SW"
+    assert result.fixed_exams_imported_count == 0
+    assert result.fixed_exams == []
 
 
 def test_import_courses_from_excel_parses_multiple_prerequisites() -> None:
@@ -61,6 +74,20 @@ def test_import_courses_from_excel_rejects_invalid_headers() -> None:
         assert any("Column A should be 'Course ID'" in issue.message for issue in error.issues)
     else:
         raise AssertionError("Expected CourseImportError for invalid headers.")
+
+
+def test_import_courses_from_excel_rejects_invalid_fixed_exam_headers() -> None:
+    content = build_workbook_bytes(
+        [["ALG1", "Algebra 1", 1, "yes", "", ""]],
+        fixed_headers=["Wrong", "Course Name", "Exam Date", "Prerequisites", "Department"],
+    )
+
+    try:
+        import_courses_from_excel(content)
+    except CourseImportError as error:
+        assert any("sheet 'Fixed Exams'" in issue.message for issue in error.issues)
+    else:
+        raise AssertionError("Expected CourseImportError for invalid fixed exam headers.")
 
 
 def test_import_courses_from_excel_rejects_invalid_high_failure_value() -> None:
@@ -107,7 +134,7 @@ def test_import_courses_from_excel_rejects_empty_workbook() -> None:
     try:
         import_courses_from_excel(content)
     except CourseImportError as error:
-        assert any("does not contain any course rows" in issue.message for issue in error.issues)
+        assert any("does not contain any importable rows" in issue.message for issue in error.issues)
     else:
         raise AssertionError("Expected CourseImportError for empty workbook.")
 
@@ -127,7 +154,33 @@ def test_export_course_template_excel_uses_current_headers() -> None:
     content = export_course_template_excel()
 
     workbook = load_workbook(filename=BytesIO(content), data_only=True)
-    worksheet = workbook.active
-    headers = [worksheet.cell(row=1, column=column).value for column in range(1, 7)]
+    courses_sheet = workbook["Courses"]
+    fixed_sheet = workbook["Fixed Exams"]
 
-    assert headers == ["Course ID", "Course Name", "Semester", "Is High Failure", "Prerequisites", "Department"]
+    course_headers = [courses_sheet.cell(row=1, column=column).value for column in range(1, 7)]
+    fixed_headers = [fixed_sheet.cell(row=1, column=column).value for column in range(1, 6)]
+
+    assert course_headers == ["Course ID", "Course Name", "Semester", "Is High Failure", "Prerequisites", "Department"]
+    assert fixed_headers == ["Course ID", "Course Name", "Exam Date", "Prerequisites", "Department"]
+    assert str(courses_sheet.cell(row=2, column=1).value).startswith("EXAMPLE")
+    assert str(fixed_sheet.cell(row=2, column=1).value).startswith("EXAMPLE")
+
+
+def test_import_courses_from_excel_parses_fixed_exams_and_skips_example_rows() -> None:
+    content = build_workbook_bytes(
+        [
+            ["EXAMPLE_CS101", "Example Course", 1, "no", "", "SW"],
+            ["ALG1", "Algebra 1", 1, "yes", "", ""],
+        ],
+        fixed_rows=[
+            ["EXAMPLE_CS101", "Example Course", "2026-06-22", "", "SW"],
+            ["ALG1", "Algebra 1", "2026-06-22", "", "SW"],
+        ],
+    )
+
+    result = import_courses_from_excel(content)
+
+    assert result.imported_count == 1
+    assert result.fixed_exams_imported_count == 1
+    assert result.courses[0].course_code == "ALG1"
+    assert result.fixed_exams[0].course_code == "ALG1"

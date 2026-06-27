@@ -37,9 +37,9 @@ class ExcludedDateRange(DateRange):
 
 class MoedWindow(DateRange):
     moed_number: int = Field(default=1, ge=1, le=3)
-    same_semester_gap_days: int = Field(default=3, ge=1, le=30)
-    prerequisite_gap_days: int = Field(default=3, ge=1, le=30)
-    high_failure_gap_days: int = Field(default=3, ge=1, le=30)
+    same_semester_gap_days: int = Field(default=3, ge=0, le=30)
+    prerequisite_gap_days: int = Field(default=3, ge=0, le=30)
+    high_failure_gap_days: int = Field(default=3, ge=0, le=30)
 
 
 def normalize_prerequisite_course_codes(value: object) -> list[str]:
@@ -76,6 +76,20 @@ class FixedExam(BaseModel):
     exam_date: date
     locked: bool = True
     reason: str | None = Field(default=None, max_length=200)
+    department: DepartmentCode | None = None
+
+    @field_validator("department", mode="before")
+    @classmethod
+    def normalize_department(cls, value: object) -> DepartmentCode | None:
+        if value is None:
+            return None
+
+        text = str(value).strip().upper()
+        if not text:
+            return None
+        if text in {"SW", "IS"}:
+            return text
+        raise ValueError("Department must be empty, SW, or IS.")
 
     @field_validator("prerequisite_course_codes", mode="before")
     @classmethod
@@ -131,7 +145,7 @@ class ValidationIssue(BaseModel):
 class ConstraintConfig(BaseModel):
     same_semester_gap_days: int = Field(default=3, ge=1, le=30)
     adjacent_semester_gap_days: int = Field(default=2, ge=1, le=30)
-    prerequisite_gap_days: int = Field(default=3, ge=1, le=30)
+    prerequisite_gap_days: int = Field(default=3, ge=0, le=30)
     high_failure_gap_days: int = Field(default=3, ge=1, le=30)
     global_spacing_weight: int = Field(default=4, ge=0, le=50)
 
@@ -247,3 +261,5 @@ class ManualMoveRequest(BaseModel):
 class CourseImportResponse(BaseModel):
     imported_count: int = Field(ge=0)
     courses: list[CourseInput] = Field(default_factory=list)
+    fixed_exams_imported_count: int = Field(default=0, ge=0)
+    fixed_exams: list[FixedExam] = Field(default_factory=list)

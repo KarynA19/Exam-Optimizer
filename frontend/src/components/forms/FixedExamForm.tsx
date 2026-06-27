@@ -2,6 +2,8 @@ import { useState } from "react";
 
 import type { FixedExam } from "../../types";
 
+type DepartmentOption = "ALL" | "SW" | "IS";
+
 function parsePrerequisiteCourseCodes(value: string): string[] {
   return value
     .replace(/;/g, ",")
@@ -25,6 +27,7 @@ export function FixedExamForm({
     initialValue?.prerequisite_course_codes.join(", ") ?? "",
   );
   const [examDate, setExamDate] = useState(initialValue?.exam_date ?? "");
+  const [department, setDepartment] = useState<DepartmentOption>(initialValue?.department ?? "ALL");
 
   return (
     <form
@@ -37,11 +40,13 @@ export function FixedExamForm({
           prerequisite_course_codes: parsePrerequisiteCourseCodes(prerequisiteCourseCodes),
           exam_date: examDate,
           locked: true,
+          department: department === "ALL" ? null : department,
         });
         setCourseCode("");
         setCourseName("");
         setPrerequisiteCourseCodes("");
         setExamDate("");
+        setDepartment("ALL");
       }}
     >
       <div className="field-row field-row-triple">
@@ -66,6 +71,14 @@ export function FixedExamForm({
             onChange={(event) => setPrerequisiteCourseCodes(event.target.value)}
             placeholder="ALG1, CALC1"
           />
+        </label>
+        <label>
+          <span>Department</span>
+          <select value={department} onChange={(event) => setDepartment(event.target.value as DepartmentOption)}>
+            <option value="ALL">All departments</option>
+            <option value="SW">SW</option>
+            <option value="IS">IS</option>
+          </select>
         </label>
       </div>
       <div className="button-row button-row-inline">

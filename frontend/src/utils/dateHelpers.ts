@@ -8,7 +8,15 @@ export function diffDays(firstDate: string, secondDate: string) {
 }
 
 export function formatCalendarLabel(dateText: string) {
-  return toDate(dateText).toLocaleDateString(undefined, { month: "short", day: "numeric" });
+  return formatDisplayDate(dateText);
+}
+
+export function formatDisplayDate(dateText: string) {
+  const [year, month, day] = dateText.split("-");
+  if (!year || !month || !day) {
+    return dateText;
+  }
+  return `${day}-${month}-${year}`;
 }
 
 export function isWeekend(dateText: string) {

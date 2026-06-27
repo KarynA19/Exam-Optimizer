@@ -28,6 +28,11 @@ export function buildCalendarDays(project: ScheduleProject, moedNumber?: number)
   return days;
 }
 
+export function getExcludedDateReason(project: ScheduleProject, dateText: string): string | null {
+  const match = project.excluded_ranges.find((range) => range.start_date <= dateText && dateText <= range.end_date);
+  return match?.reason ?? null;
+}
+
 export function getSolutionMetrics(solution: ScheduleSolution, courseByCode?: Record<string, CourseInput>) {
   const sortedExams = [...solution.exams].sort((left, right) => left.exam_date.localeCompare(right.exam_date));
   const gaps: number[] = [];

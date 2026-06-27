@@ -58,5 +58,10 @@ def download_course_template() -> Response:
     return Response(
         content=content,
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        headers={"Content-Disposition": 'attachment; filename="course-import-template.xlsx"'},
+        headers={
+            "Content-Disposition": 'attachment; filename="course-import-template.xlsx"',
+            "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
+            "Pragma": "no-cache",
+            "Expires": "0",
+        },
     )

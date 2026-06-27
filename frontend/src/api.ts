@@ -1,4 +1,16 @@
-import type { CourseImportResponse, ExplainMoveResponse, ManualMoveResponse, ScheduleProject, ValidationIssue } from "./types";
+import type {
+  AuthLoginResponse,
+  CourseImportResponse,
+  CourseInput,
+  ExplainMoveResponse,
+  FixedExam,
+  ManualMoveResponse,
+  RemoteSavedSetupPayload,
+  RemoteSavedSetupSummary,
+  ScheduleProject,
+  ScheduleSolution,
+  ValidationIssue,
+} from "./types";
 
 function resolveApiBase(): string {
   const configuredBase = import.meta.env.VITE_API_BASE?.trim();
@@ -14,6 +26,60 @@ function resolveApiBase(): string {
 }
 
 const API_BASE = resolveApiBase();
+const AUTH_TOKEN_KEY = "exam_optimizer_auth_token";
+const AUTH_USER_ID_KEY = "exam_optimizer_auth_user_id";
+
+export function getStoredAuthToken(): string | null {
+  return window.localStorage.getItem(AUTH_TOKEN_KEY);
+}
+
+export function setStoredAuthToken(token: string | null) {
+  if (!token) {
+    window.localStorage.removeItem(AUTH_TOKEN_KEY);
+    window.localStorage.removeItem(AUTH_USER_ID_KEY);
+    return;
+  }
+
+  window.localStorage.setItem(AUTH_TOKEN_KEY, token);
+}
+
+export function getStoredAuthUserId(): string | null {
+  return window.localStorage.getItem(AUTH_USER_ID_KEY);
+}
+
+export function setStoredAuthUserId(userId: string | null) {
+  if (!userId) {
+    window.localStorage.removeItem(AUTH_USER_ID_KEY);
+    return;
+  }
+
+  window.localStorage.setItem(AUTH_USER_ID_KEY, userId);
+}
+
+function buildAuthHeaders(): HeadersInit {
+  const token = getStoredAuthToken();
+  return token ? { Authorization: `Bearer ${token}` } : {};
+}
+
+export async function loginToBackend(userId: string, password: string): Promise<AuthLoginResponse> {
+  const response = await fetch(`${API_BASE}/auth/login`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ user_id: userId, password }),
+  });
+
+  if (!response.ok) {
+    const detail = await response.json().catch(() => null);
+    throw new Error(detail?.detail ?? "Login failed.");
+  }
+
+  const payload = await response.json() as AuthLoginResponse;
+  setStoredAuthToken(payload.token);
+  setStoredAuthUserId(payload.user_id);
+  return payload;
+}
 
 export async function validateProject(project: ScheduleProject): Promise<ScheduleProject> {
   const response = await fetch(`${API_BASE}/projects/validate`, {
@@ -31,13 +97,17 @@ export async function validateProject(project: ScheduleProject): Promise<Schedul
   return response.json();
 }
 
-export async function solveProject(project: ScheduleProject): Promise<{ project_name: string; solutions: unknown[]; issues: unknown[] }> {
+export async function solveProject(
+  project: ScheduleProject,
+  options?: { signal?: AbortSignal },
+): Promise<{ project_name: string; solutions: unknown[]; issues: unknown[] }> {
   const response = await fetch(`${API_BASE}/projects/solve`, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
     },
     body: JSON.stringify({ project, max_solutions: 5 }),
+    signal: options?.signal,
   });
 
   if (!response.ok) {
@@ -129,11 +199,139 @@ export async function importCoursesSpreadsheet(file: File): Promise<CourseImport
 
 
 export async function downloadCourseTemplate(): Promise<Blob> {
-  const response = await fetch(`${API_BASE}/projects/import-courses/template`);
+  const cacheBuster = Date.now();
+  const response = await fetch(`${API_BASE}/projects/import-courses/template?ts=${cacheBuster}`, {
+    cache: "no-store",
+  });
 
   if (!response.ok) {
     throw new Error("Course template download failed.");
   }
 
   return response.blob();
+}
+
+export async function listRemoteSavedSetups(): Promise<RemoteSavedSetupSummary[]> {
+  const response = await fetch(`${API_BASE}/saved-setups`, {
+    headers: {
+      ...buildAuthHeaders(),
+    },
+  });
+
+  if (!response.ok) {
+    const detail = await response.json().catch(() => null);
+    throw new Error(detail?.detail ?? "Failed to list saved setups.");
+  }
+
+  return response.json();
+}
+
+export async function saveRemoteSetup(
+  project: ScheduleProject,
+  setupId?: string | null,
+  savedSolutionId?: string | null,
+): Promise<RemoteSavedSetupSummary> {
+  const response = await fetch(`${API_BASE}/saved-setups`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      ...buildAuthHeaders(),
+    },
+    body: JSON.stringify({
+      project,
+      setup_id: setupId ?? null,
+      saved_solution_id: savedSolutionId ?? null,
+    }),
+  });
+
+  if (!response.ok) {
+    const detail = await response.json().catch(() => null);
+    throw new Error(detail?.detail ?? "Failed to save setup.");
+  }
+
+  return response.json();
+}
+
+export async function loadRemoteSetup(setupId: string): Promise<RemoteSavedSetupPayload> {
+  const response = await fetch(`${API_BASE}/saved-setups/${setupId}`, {
+    headers: {
+      ...buildAuthHeaders(),
+    },
+  });
+
+  if (!response.ok) {
+    const detail = await response.json().catch(() => null);
+    throw new Error(detail?.detail ?? "Failed to load setup.");
+  }
+
+  return response.json();
+}
+
+export async function deleteRemoteSetup(setupId: string): Promise<void> {
+  const response = await fetch(`${API_BASE}/saved-setups/${setupId}`, {
+    method: "DELETE",
+    headers: {
+      ...buildAuthHeaders(),
+    },
+  });
+
+  if (!response.ok) {
+    const detail = await response.json().catch(() => null);
+    throw new Error(detail?.detail ?? "Failed to delete setup.");
+  }
+}
+
+export async function updateRemoteSetupSolutions(
+  setupId: string,
+  solutions: ScheduleSolution[],
+  savedSolutionId?: string | null,
+): Promise<RemoteSavedSetupSummary> {
+  const response = await fetch(`${API_BASE}/saved-setups/${setupId}/solutions`, {
+    method: "PUT",
+    headers: {
+      "Content-Type": "application/json",
+      ...buildAuthHeaders(),
+    },
+    body: JSON.stringify({
+      solutions,
+      saved_solution_id: savedSolutionId ?? null,
+    }),
+  });
+
+  if (!response.ok) {
+    const detail = await response.json().catch(() => null);
+    throw new Error(detail?.detail ?? "Failed to update setup solutions.");
+  }
+
+  return response.json();
+}
+
+export async function loadRemoteSetupCourses(setupId: string): Promise<CourseInput[]> {
+  const response = await fetch(`${API_BASE}/saved-setups/${setupId}/courses`, {
+    headers: {
+      ...buildAuthHeaders(),
+    },
+  });
+
+  if (!response.ok) {
+    const detail = await response.json().catch(() => null);
+    throw new Error(detail?.detail ?? "Failed to load courses from saved setup.");
+  }
+
+  return response.json();
+}
+
+export async function loadRemoteSetupFixedExams(setupId: string): Promise<FixedExam[]> {
+  const response = await fetch(`${API_BASE}/saved-setups/${setupId}/fixed-exams`, {
+    headers: {
+      ...buildAuthHeaders(),
+    },
+  });
+
+  if (!response.ok) {
+    const detail = await response.json().catch(() => null);
+    throw new Error(detail?.detail ?? "Failed to load fixed exams from saved setup.");
+  }
+
+  return response.json();
 }

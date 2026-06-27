@@ -7,8 +7,18 @@ from app.models.schedule import CourseInput, DepartmentCode, ManualMoveRequest, 
 
 FRIDAY_EXAM_PENALTY = 100
 SAME_SEMESTER_GAP_WEIGHT = 10
-ADJACENT_SEMESTER_SAME_DAY_PENALTY = 5
+ADJACENT_SEMESTER_NON_PREREQ_SAME_DAY_PENALTY = 200
+ADJACENT_SAME_DAY_PAIR_EXCESS_PENALTY = 240
 IDEAL_GAP_DEVIATION_WEIGHT = 40
+SAME_SEMESTER_OVER_WEEK_PENALTY = 70
+EARLY_EXAM_WEIGHT = 5
+MAX_RECOMMENDED_GAP_DAYS = 7
+SAME_PARITY_SAME_DAY_PENALTY = 70
+SEMESTER_LATE_START_PENALTY = 30
+SEMESTER_SPAN_PENALTY = 28
+SEMESTER_MISSING_FIRST_WEEK_PENALTY = 280
+SEMESTER_START_SPREAD_PENALTY = 160
+SEMESTER_START_AFTER_WEEK_ONE_PENALTY = 140
 DEPARTMENTS: tuple[DepartmentCode, ...] = ("SW", "IS")
 
 
@@ -71,7 +81,7 @@ def iter_allowed_dates(project: ScheduleProject) -> list[date]:
 
 
 def gap_days(first_date: date, second_date: date) -> int:
-    return abs((first_date - second_date).days)
+    return max(0, abs((first_date - second_date).days) - 1)
 
 
 def pair_requires_same_semester_gap(first_course: CourseInput, second_course: CourseInput) -> bool:
@@ -94,9 +104,21 @@ def pair_requires_high_failure_gap(first_course: CourseInput, second_course: Cou
     if not courses_share_department(first_course, second_course):
         return False
 
-    return (first_course.high_failure_rate and second_course.semester_number in {2, 3}) or (
-        second_course.high_failure_rate and first_course.semester_number in {2, 3}
-    )
+    if first_course.high_failure_rate:
+        if second_course.semester_number in {
+            first_course.semester_number - 1,
+            first_course.semester_number - 2,
+        }:
+            return True
+
+    if second_course.high_failure_rate:
+        if first_course.semester_number in {
+            second_course.semester_number - 1,
+            second_course.semester_number - 2,
+        }:
+            return True
+
+    return False
 
 
 def pair_prefers_adjacent_semester_spacing(first_course: CourseInput, second_course: CourseInput) -> bool:
@@ -181,8 +203,6 @@ def pair_required_gap_days(
 
     if pair_requires_same_semester_gap(first_course, second_course):
         min_gap = max(min_gap, first_window.same_semester_gap_days)
-    if pair_requires_adjacent_semester_gap(first_course, second_course):
-        min_gap = max(min_gap, project.constraint_config.adjacent_semester_gap_days)
     if pair_requires_prerequisite_gap(first_course, second_course):
         min_gap = max(min_gap, first_window.prerequisite_gap_days)
     if pair_requires_high_failure_gap(first_course, second_course):
@@ -196,16 +216,48 @@ def score_solution(project: ScheduleProject, exams: list[ScheduledExam]) -> int:
     total_score = 0
     ideal_gap = ideal_gap_target_days(project)
     sorted_exams = sorted(exams, key=lambda exam: (exam.exam_date, exam.course_code))
+    project_start_date, _ = project_window_bounds(project)
 
     total_score -= global_spacing_deviation(project, exams) * project.constraint_config.global_spacing_weight
 
     for exam in exams:
         if date_is_friday(exam.exam_date):
             total_score -= FRIDAY_EXAM_PENALTY
+        total_score -= gap_days(project_start_date, exam.exam_date) * EARLY_EXAM_WEIGHT
 
     for index in range(1, len(sorted_exams)):
         distance = gap_days(sorted_exams[index - 1].exam_date, sorted_exams[index].exam_date)
         total_score -= abs(distance - ideal_gap) * IDEAL_GAP_DEVIATION_WEIGHT
+
+    exams_by_semester: dict[int, list[ScheduledExam]] = {}
+    for exam in exams:
+        course = course_lookup.get(exam.course_code)
+        if course is None:
+            continue
+        exams_by_semester.setdefault(course.semester_number, []).append(exam)
+
+    first_week_last_date = project_start_date + timedelta(days=6)
+    semester_start_dates: list[date] = []
+    for semester_exams in exams_by_semester.values():
+        if not semester_exams:
+            continue
+        semester_dates = [semester_exam.exam_date for semester_exam in semester_exams]
+        earliest_semester_date = min(semester_dates)
+        latest_semester_date = max(semester_dates)
+        semester_start_dates.append(earliest_semester_date)
+
+        total_score -= gap_days(project_start_date, earliest_semester_date) * SEMESTER_LATE_START_PENALTY
+        total_score -= gap_days(earliest_semester_date, latest_semester_date) * SEMESTER_SPAN_PENALTY
+        if earliest_semester_date > first_week_last_date:
+            total_score -= SEMESTER_MISSING_FIRST_WEEK_PENALTY
+            total_score -= gap_days(first_week_last_date, earliest_semester_date) * SEMESTER_START_AFTER_WEEK_ONE_PENALTY
+
+    if semester_start_dates:
+        earliest_start = min(semester_start_dates)
+        latest_start = max(semester_start_dates)
+        total_score -= gap_days(earliest_start, latest_start) * SEMESTER_START_SPREAD_PENALTY
+
+    adjacent_same_day_pair_count = 0
 
     for index, exam in enumerate(exams):
         course = course_lookup.get(exam.course_code)
@@ -222,14 +274,26 @@ def score_solution(project: ScheduleProject, exams: list[ScheduledExam]) -> int:
             other_window = moed_window_for_date(project, other_exam.exam_date)
             in_same_window = current_window is not None and other_window is not None and current_window.moed_number == other_window.moed_number
             if in_same_window and pair_requires_same_semester_gap(course, other_course):
-                total_score += distance * (current_window.same_semester_gap_days if in_same_window and current_window else 1) * SAME_SEMESTER_GAP_WEIGHT
+                if distance > MAX_RECOMMENDED_GAP_DAYS:
+                    total_score -= (distance - MAX_RECOMMENDED_GAP_DAYS) * SAME_SEMESTER_OVER_WEEK_PENALTY
             elif in_same_window and pair_requires_prerequisite_gap(course, other_course):
                 total_score += distance * (current_window.prerequisite_gap_days if in_same_window and current_window else 1)
             elif in_same_window and pair_requires_high_failure_gap(course, other_course):
                 total_score += distance * ((current_window.high_failure_gap_days if in_same_window and current_window else 1) + 1)
 
             if pair_prefers_adjacent_semester_spacing(course, other_course) and distance == 0:
-                total_score -= ADJACENT_SEMESTER_SAME_DAY_PENALTY
+                adjacent_same_day_pair_count += 1
+                if not pair_requires_prerequisite_gap(course, other_course):
+                    total_score -= ADJACENT_SEMESTER_NON_PREREQ_SAME_DAY_PENALTY
+
+            if (
+                course.semester_number != other_course.semester_number
+                and course.semester_number % 2 == other_course.semester_number % 2
+                and distance == 0
+            ):
+                total_score -= SAME_PARITY_SAME_DAY_PENALTY
+
+    total_score -= max(0, adjacent_same_day_pair_count - 1) * ADJACENT_SAME_DAY_PAIR_EXCESS_PENALTY
 
     return total_score
 
@@ -278,7 +342,6 @@ def pair_constraint_issues(
         return issues
 
     same_semester_gap = moved_window.same_semester_gap_days
-    adjacent_semester_gap = project.constraint_config.adjacent_semester_gap_days
     prerequisite_gap = moved_window.prerequisite_gap_days
     high_failure_gap = moved_window.high_failure_gap_days
 
@@ -288,19 +351,6 @@ def pair_constraint_issues(
                 code="unsatisfied_constraint",
                 severity="error",
                 message=f"Courses in the same semester need at least a {same_semester_gap}-day gap.",
-                related_course_code=other_course.course_code,
-                related_date=other_date,
-            )
-        )
-
-    if pair_requires_adjacent_semester_gap(moved_course, other_course) and distance < adjacent_semester_gap:
-        issues.append(
-            ValidationIssue(
-                code="unsatisfied_constraint",
-                severity="error",
-                message=(
-                    f"Courses in back-to-back semesters need at least a {adjacent_semester_gap}-day gap."
-                ),
                 related_course_code=other_course.course_code,
                 related_date=other_date,
             )
@@ -322,7 +372,10 @@ def pair_constraint_issues(
             ValidationIssue(
                 code="unsatisfied_constraint",
                 severity="error",
-                message=f"High-failure courses must stay at least {high_failure_gap} days away from semester 2 or 3 exams.",
+                message=(
+                    f"High-failure courses must stay at least {high_failure_gap} days away "
+                    "from exams in their two preceding semesters."
+                ),
                 related_course_code=other_course.course_code,
                 related_date=other_date,
             )
@@ -334,6 +387,11 @@ def pair_constraint_issues(
 def validate_solution_exams(project: ScheduleProject, exams: list[ScheduledExam]) -> list[ValidationIssue]:
     issues: list[ValidationIssue] = []
     course_lookup = {course.course_code: course for course in project.courses}
+    fixed_exam_lookup = {fixed_exam.course_code: fixed_exam for fixed_exam in project.fixed_exams}
+    fixed_exams_by_prerequisite_code: dict[str, list] = {}
+    for fixed_exam in project.fixed_exams:
+        for prerequisite_code in fixed_exam.prerequisite_course_codes:
+            fixed_exams_by_prerequisite_code.setdefault(prerequisite_code, []).append(fixed_exam)
 
     for exam in exams:
         if not date_in_any_window(project, exam.exam_date):
@@ -412,6 +470,53 @@ def validate_solution_exams(project: ScheduleProject, exams: list[ScheduledExam]
                 continue
             issues.extend(pair_constraint_issues(project, course, exam.exam_date, other_course, other_exam.exam_date))
 
+        exam_window = moed_window_for_date(project, exam.exam_date)
+        if exam_window is None:
+            continue
+
+        for prerequisite_code in course.prerequisite_course_codes:
+            prerequisite_fixed_exam = fixed_exam_lookup.get(prerequisite_code)
+            if prerequisite_fixed_exam is None:
+                continue
+            prerequisite_fixed_exam_window = moed_window_for_date(project, prerequisite_fixed_exam.exam_date)
+            if prerequisite_fixed_exam_window is None or prerequisite_fixed_exam_window.moed_number != exam_window.moed_number:
+                continue
+
+            distance = gap_days(exam.exam_date, prerequisite_fixed_exam.exam_date)
+            if distance < exam_window.prerequisite_gap_days:
+                issues.append(
+                    ValidationIssue(
+                        code="unsatisfied_constraint",
+                        severity="error",
+                        message=(
+                            "Prerequisite-linked fixed and scheduled exams need at least "
+                            f"{exam_window.prerequisite_gap_days} free day(s)."
+                        ),
+                        related_course_code=exam.course_code,
+                        related_date=exam.exam_date,
+                    )
+                )
+
+        for dependent_fixed_exam in fixed_exams_by_prerequisite_code.get(exam.course_code, []):
+            dependent_fixed_exam_window = moed_window_for_date(project, dependent_fixed_exam.exam_date)
+            if dependent_fixed_exam_window is None or dependent_fixed_exam_window.moed_number != exam_window.moed_number:
+                continue
+
+            distance = gap_days(exam.exam_date, dependent_fixed_exam.exam_date)
+            if distance < exam_window.prerequisite_gap_days:
+                issues.append(
+                    ValidationIssue(
+                        code="unsatisfied_constraint",
+                        severity="error",
+                        message=(
+                            "Prerequisite-linked fixed and scheduled exams need at least "
+                            f"{exam_window.prerequisite_gap_days} free day(s)."
+                        ),
+                        related_course_code=exam.course_code,
+                        related_date=exam.exam_date,
+                    )
+                )
+
     issues.extend(friday_department_issues(project, exams))
 
     return issues
@@ -422,6 +527,7 @@ def validate_project(project: ScheduleProject) -> list[ValidationIssue]:
 
     seen_course_codes: set[str] = set()
     course_lookup = {course.course_code: course for course in project.courses}
+    fixed_exam_lookup = {fixed_exam.course_code: fixed_exam for fixed_exam in project.fixed_exams}
 
     for excluded_range in project.excluded_ranges:
         if not range_in_any_window(project, excluded_range.start_date, excluded_range.end_date):
@@ -468,7 +574,7 @@ def validate_project(project: ScheduleProject) -> list[ValidationIssue]:
         missing_prerequisite_codes = [
             prerequisite_code
             for prerequisite_code in fixed_exam.prerequisite_course_codes
-            if prerequisite_code not in course_lookup
+            if prerequisite_code not in course_lookup and prerequisite_code not in fixed_exam_lookup
         ]
         if missing_prerequisite_codes:
             issues.append(
@@ -476,12 +582,39 @@ def validate_project(project: ScheduleProject) -> list[ValidationIssue]:
                     code="missing_prerequisite_target",
                     severity="error",
                     message=(
-                        "Fixed exam prerequisite course codes must match other courses in the project: "
+                        "Fixed exam prerequisite course codes must match other courses or fixed exams in the project: "
                         f"{', '.join(missing_prerequisite_codes)}."
                     ),
                     related_course_code=fixed_exam.course_code,
                 )
             )
+
+    for fixed_exam in project.fixed_exams:
+        current_window = moed_window_for_date(project, fixed_exam.exam_date)
+        if current_window is None:
+            continue
+        for prerequisite_code in fixed_exam.prerequisite_course_codes:
+            prerequisite_exam = fixed_exam_lookup.get(prerequisite_code)
+            if prerequisite_exam is None:
+                continue
+            prerequisite_window = moed_window_for_date(project, prerequisite_exam.exam_date)
+            if prerequisite_window is None or prerequisite_window.moed_number != current_window.moed_number:
+                continue
+
+            distance = gap_days(fixed_exam.exam_date, prerequisite_exam.exam_date)
+            if distance < current_window.prerequisite_gap_days:
+                issues.append(
+                    ValidationIssue(
+                        code="unsatisfied_constraint",
+                        severity="error",
+                        message=(
+                            "Fixed exams linked by prerequisites must keep at least "
+                            f"{current_window.prerequisite_gap_days} free day(s) in the same Moed."
+                        ),
+                        related_course_code=fixed_exam.course_code,
+                        related_date=fixed_exam.exam_date,
+                    )
+                )
 
     for course in project.courses:
         if course.course_code in seen_course_codes:
@@ -496,7 +629,9 @@ def validate_project(project: ScheduleProject) -> list[ValidationIssue]:
         seen_course_codes.add(course.course_code)
 
         missing_prerequisite_codes = [
-            prerequisite_code for prerequisite_code in course.prerequisite_course_codes if prerequisite_code not in course_lookup
+            prerequisite_code
+            for prerequisite_code in course.prerequisite_course_codes
+            if prerequisite_code not in course_lookup and prerequisite_code not in fixed_exam_lookup
         ]
         if missing_prerequisite_codes:
             issues.append(
@@ -504,7 +639,7 @@ def validate_project(project: ScheduleProject) -> list[ValidationIssue]:
                     code="missing_prerequisite_target",
                     severity="error",
                     message=(
-                        "Prerequisite course codes must match other courses in the project: "
+                        "Prerequisite course codes must match other courses or fixed exams in the project: "
                         f"{', '.join(missing_prerequisite_codes)}."
                     ),
                     related_course_code=course.course_code,

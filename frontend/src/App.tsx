@@ -1,76 +1,161 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
+import { format } from "date-fns";
+import type { DateRange } from "react-day-picker";
+import type { ColumnDef } from "@tanstack/react-table";
+import {
+  ArrowUpDown,
+  BookOpen,
+  CalendarCheck,
+  CalendarDays,
+  CalendarIcon,
+  Check,
+  ChevronsUpDown,
+  CircleDashed,
+  FolderKanban,
+  Lock,
+  MoreHorizontal,
+  Pencil,
+  Sparkles,
+  Trash,
+  X,
+} from "lucide-react";
 
-import { downloadCourseTemplate, explainMoveProject, importCoursesSpreadsheet, manualMoveProject, solveProject, validateProject } from "./api";
-import { EditableSimpleList } from "./components/common/EditableSimpleList";
-import { IssueList } from "./components/common/IssueList";
-import { SectionTitle } from "./components/common/SectionTitle";
-import { CourseForm } from "./components/forms/CourseForm";
-import { ExcludedRangeForm } from "./components/forms/ExcludedRangeForm";
-import { FixedExamForm } from "./components/forms/FixedExamForm";
-import { ComparisonDashboard } from "./components/workspace/ComparisonDashboard";
-import { ConflictDrawer } from "./components/workspace/ConflictDrawer";
-import { DependencyGraph } from "./components/workspace/DependencyGraph";
-import { MasterCalendar } from "./components/workspace/MasterCalendar";
-import { SolutionCard } from "./components/workspace/SolutionCard";
-import { deleteSetupEntry, loadProject, loadSetupLibrary, saveProject, upsertSetupEntry } from "./storage/localProject";
+import {
+  deleteRemoteSetup,
+  downloadCourseTemplate,
+  explainMoveProject,
+  getStoredAuthToken,
+  getStoredAuthUserId,
+  importCoursesSpreadsheet,
+  listRemoteSavedSetups,
+  loadRemoteSetup,
+  loadRemoteSetupCourses,
+  loadRemoteSetupFixedExams,
+  loginToBackend,
+  manualMoveProject,
+  saveRemoteSetup,
+  solveProject,
+  updateRemoteSetupSolutions,
+  validateProject,
+} from "./api";
 import { createEmptyProject } from "./types";
+import { buildCalendarDays } from "./utils/calendarUtils";
 import type {
-  CourseInput,
+  CourseDepartment,
   CourseImportResponse,
+  CourseInput,
   ExcludedDateRange,
   FixedExam,
+  ImportMode,
   MoedWindow,
-  SavedSetupEntry,
-  SavedSetupLibrary,
+  RemoteSavedSetupSummary,
   ScheduleProject,
-  ScheduleSolution,
-  ScheduledExam,
   ValidationIssue,
 } from "./types";
-import { buildCalendarDays } from "./utils/calendarUtils";
-import { getExamMoveKey, getPreviewKey, hasExamChanged } from "./utils/examKeys";
+import { loadProject, saveProject } from "./storage/localProject";
+import { getExamMoveKey, getPreviewKey } from "./utils/examKeys";
+import type { PreviewResponse } from "./utils/workspaceUtils";
+import { formatDisplayDate } from "./utils/dateHelpers";
+import { cn } from "./lib/utils";
+import { Badge } from "./components/ui/badge";
+import { Button } from "./components/ui/button";
+import { Calendar } from "./components/ui/calendar";
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "./components/ui/card";
 import {
-  buildDependencyEdges,
-  getPreviewStatus,
-  type PreviewResponse,
-} from "./utils/workspaceUtils";
+  Command,
+  CommandEmpty,
+  CommandGroup,
+  CommandInput,
+  CommandItem,
+  CommandList,
+} from "./components/ui/command";
+import { DataTable } from "./components/ui/data-table";
+import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "./components/ui/dropdown-menu";
+import { Form, FormField, FormItem, FormMessage } from "./components/ui/form";
+import { Input } from "./components/ui/input";
+import { Label } from "./components/ui/label";
+import { Popover, PopoverContent, PopoverTrigger } from "./components/ui/popover";
+import { Sidebar } from "./components/ui/sidebar";
+import { Tabs, TabsContent } from "./components/ui/tabs";
+import { MasterCalendar } from "./components/workspace/MasterCalendar";
+import { ConflictDrawer } from "./components/workspace/ConflictDrawer";
 
-type SetupStep = "project" | "excluded" | "fixed" | "courses";
-type AppRoute = "/setup" | "/schedule";
+type SetupStep = "setup" | "excluded" | "fixed" | "courses";
+type AppRoute = "setup" | "schedule";
 
-function readRouteFromLocation(): { route: AppRoute; section: SetupStep | null } {
-  const route: AppRoute = window.location.pathname === "/schedule" ? "/schedule" : "/setup";
-  const hash = window.location.hash.replace("#", "");
-  const section = ["project", "excluded", "fixed", "courses"].includes(hash) ? (hash as SetupStep) : null;
-  return { route, section };
+type CourseDraft = {
+  course_code: string;
+  course_name: string;
+  semester_number: number;
+  high_failure_rate: boolean;
+  department: CourseDepartment;
+  prerequisite_course_codes: string[];
+};
+
+type FixedDraft = {
+  course_code: string;
+  course_name: string;
+  exam_date: string;
+  department: CourseDepartment;
+  prerequisite_course_codes: string[];
+};
+
+function prettifyPath(path: string): string {
+  return path
+    .replace(/_/g, " ")
+    .replace(/\s+/g, " ")
+    .replace(/\b\w/g, (char) => char.toUpperCase())
+    .trim();
 }
 
-function getConflictKey(issue: ValidationIssue): string {
-  return [issue.code, issue.related_course_code ?? "", issue.related_date ?? "", issue.message].join("|");
-}
+function formatApiErrorMessage(error: unknown, fallback: string): string {
+  if (!(error instanceof Error)) {
+    return fallback;
+  }
 
-const SETUP_STEPS: Array<{ id: SetupStep; title: string; subtitle: string }> = [
-  {
-    id: "project",
-    title: "Initial Setup",
-    subtitle: "Define 1-3 Moed windows, their date ranges and gaps, then set the scheduling rules.",
-  },
-  {
-    id: "excluded",
-    title: "Excluded Dates",
-    subtitle: "Block holidays or unavailable spans.",
-  },
-  {
-    id: "fixed",
-    title: "Fixed Exams",
-    subtitle: "Lock courses that already have confirmed exam dates.",
-  },
-  {
-    id: "courses",
-    title: "Courses",
-    subtitle: "Add courses manually or replace the current list from the Excel template.",
-  },
-];
+  const rawMessage = error.message?.trim();
+  if (!rawMessage) {
+    return fallback;
+  }
+
+  try {
+    const parsed = JSON.parse(rawMessage) as {
+      detail?: Array<{ msg?: string; loc?: Array<string | number> }> | string;
+    };
+
+    if (!parsed.detail) {
+      return rawMessage;
+    }
+
+    if (typeof parsed.detail === "string") {
+      return parsed.detail;
+    }
+
+    const messages = parsed.detail
+      .map((entry) => {
+        const message = entry.msg?.replace(/^Value error,\s*/i, "") ?? "Invalid value.";
+        if (!entry.loc || entry.loc.length === 0) {
+          return message;
+        }
+
+        const path = entry.loc
+          .filter((part) => part !== "body" && part !== "project")
+          .map((part) => String(part))
+          .join(" > ");
+
+        return path ? `${prettifyPath(path)}: ${message}` : message;
+      })
+      .filter(Boolean);
+
+    if (messages.length > 0) {
+      return messages.join(" | ");
+    }
+  } catch {
+    return rawMessage;
+  }
+
+  return rawMessage;
+}
 
 function addDays(dateText: string, days: number) {
   const nextDate = new Date(`${dateText}T00:00:00`);
@@ -82,12 +167,50 @@ function getMoedLabel(moedNumber: number) {
   return `Moed ${String.fromCharCode(64 + moedNumber)}`;
 }
 
-function formatMoedWindowSummary(windows: MoedWindow[]) {
-  return windows
-    .map((window) => {
-      return `${getMoedLabel(window.moed_number)}: ${window.start_date} to ${window.end_date}`;
-    })
-    .join(" | ");
+function getIssueKey(issue: ValidationIssue): string {
+  return [issue.code, issue.related_course_code ?? "", issue.related_date ?? "", issue.message].join("|");
+}
+
+function parseBoundedInteger(value: string, min: number, max: number, fallback: number): number {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) {
+    return fallback;
+  }
+
+  return Math.max(min, Math.min(max, Math.trunc(parsed)));
+}
+
+function inferSemesterFromCourseCode(courseCode: string): number {
+  const digits = courseCode.replace(/\D/g, "");
+  if (!digits) {
+    return 1;
+  }
+
+  const numericCode = Number(digits);
+  if (!Number.isFinite(numericCode) || numericCode <= 0) {
+    return 1;
+  }
+
+  if (numericCode >= 100 && numericCode < 200) {
+    return 1;
+  }
+
+  if (numericCode >= 200 && numericCode < 300) {
+    const suffix = numericCode % 10;
+    return [0, 5, 6, 7, 8, 9].includes(suffix) ? 4 : 3;
+  }
+
+  if (numericCode >= 300 && numericCode < 400) {
+    const suffix = numericCode % 10;
+    return [0, 5, 6, 7, 8, 9].includes(suffix) ? 6 : 5;
+  }
+
+  if (numericCode >= 400 && numericCode < 500) {
+    const suffix = numericCode % 10;
+    return [0, 5, 6, 7, 8, 9].includes(suffix) ? 8 : 7;
+  }
+
+  return 1;
 }
 
 function buildMoedWindows(targetCount: number, currentWindows: MoedWindow[]) {
@@ -108,11 +231,10 @@ function buildMoedWindows(targetCount: number, currentWindows: MoedWindow[]) {
     }
 
     const nextStart = addDays(previousWindow.end_date, 1);
-    const previousDuration = Math.max(0, Math.round((new Date(`${previousWindow.end_date}T00:00:00`).getTime() - new Date(`${previousWindow.start_date}T00:00:00`).getTime()) / (24 * 60 * 60 * 1000)));
     nextWindows.push({
       moed_number: index + 1,
       start_date: nextStart,
-      end_date: addDays(nextStart, previousDuration),
+      end_date: addDays(nextStart, 30),
       same_semester_gap_days: previousWindow.same_semester_gap_days,
       prerequisite_gap_days: previousWindow.prerequisite_gap_days,
       high_failure_gap_days: previousWindow.high_failure_gap_days,
@@ -122,1378 +244,1852 @@ function buildMoedWindows(targetCount: number, currentWindows: MoedWindow[]) {
   return nextWindows;
 }
 
+function formatRangeLabel(range: DateRange | undefined) {
+  if (!range?.from) {
+    return "Pick date range";
+  }
+  if (!range.to) {
+    return format(range.from, "PPP");
+  }
+  return `${format(range.from, "PPP")} - ${format(range.to, "PPP")}`;
+}
+
+function MultiSelectCombobox({
+  options,
+  values,
+  placeholder,
+  onChange,
+}: {
+  options: string[];
+  values: string[];
+  placeholder: string;
+  onChange: (nextValues: string[]) => void;
+}) {
+  const [open, setOpen] = useState(false);
+
+  return (
+    <div className="space-y-2">
+      <Popover open={open} onOpenChange={setOpen}>
+        <PopoverTrigger asChild>
+          <Button type="button" variant="outline" className="w-full justify-between">
+            <span className="truncate">{values.length > 0 ? `${values.length} selected` : placeholder}</span>
+            <ChevronsUpDown className="h-4 w-4 opacity-60" />
+          </Button>
+        </PopoverTrigger>
+        <PopoverContent className="w-[var(--radix-popover-trigger-width)] p-0">
+          <Command>
+            <CommandInput placeholder="Search course code..." />
+            <CommandList>
+              <CommandEmpty>No course found.</CommandEmpty>
+              <CommandGroup>
+                {options.map((option) => {
+                  const selected = values.includes(option);
+                  return (
+                    <CommandItem
+                      key={option}
+                      value={option}
+                      onSelect={() => {
+                        onChange(selected ? values.filter((value) => value !== option) : [...values, option]);
+                      }}
+                    >
+                      <Check className={cn("mr-2 h-4 w-4", selected ? "opacity-100" : "opacity-0")} />
+                      {option}
+                    </CommandItem>
+                  );
+                })}
+              </CommandGroup>
+            </CommandList>
+          </Command>
+        </PopoverContent>
+      </Popover>
+      {values.length > 0 ? (
+        <div className="flex flex-wrap gap-2">
+          {values.map((value) => (
+            <Badge key={value} variant="secondary" className="gap-1">
+              {value}
+              <button
+                type="button"
+                aria-label={`Remove ${value}`}
+                onClick={() => onChange(values.filter((entry) => entry !== value))}
+                className="rounded px-1 text-slate-500 hover:bg-slate-200"
+              >
+                x
+              </button>
+            </Badge>
+          ))}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function SingleSelectCombobox({
+  value,
+  placeholder,
+  options,
+  onChange,
+}: {
+  value: CourseDepartment;
+  placeholder: string;
+  options: Array<{ label: string; value: CourseDepartment }>;
+  onChange: (next: CourseDepartment) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const activeLabel = options.find((option) => option.value === value)?.label ?? placeholder;
+
+  return (
+    <Popover open={open} onOpenChange={setOpen}>
+      <PopoverTrigger asChild>
+        <Button type="button" variant="outline" className="w-full justify-between">
+          {activeLabel}
+          <ChevronsUpDown className="h-4 w-4 opacity-60" />
+        </Button>
+      </PopoverTrigger>
+      <PopoverContent className="w-[var(--radix-popover-trigger-width)] p-0">
+        <Command>
+          <CommandInput placeholder="Filter department..." />
+          <CommandList>
+            <CommandGroup>
+              {options.map((option) => (
+                <CommandItem
+                  key={option.label}
+                  value={option.label}
+                  onSelect={() => {
+                    onChange(option.value);
+                    setOpen(false);
+                  }}
+                >
+                  <Check className={cn("mr-2 h-4 w-4", value === option.value ? "opacity-100" : "opacity-0")} />
+                  {option.label}
+                </CommandItem>
+              ))}
+            </CommandGroup>
+          </CommandList>
+        </Command>
+      </PopoverContent>
+    </Popover>
+  );
+}
+
 function App() {
-  const initialLocation = readRouteFromLocation();
   const [project, setProject] = useState<ScheduleProject>(() => loadProject());
-  const [setupLibrary, setSetupLibrary] = useState<SavedSetupLibrary>(() => loadSetupLibrary());
-  const [status, setStatus] = useState<string>("Draft saved locally.");
+  const [collapsedYears, setCollapsedYears] = useState<Record<string, boolean>>({});
   const [busyAction, setBusyAction] = useState<"validate" | "solve" | "manual-move" | "import-courses" | null>(null);
-  const [editingExcludedIndex, setEditingExcludedIndex] = useState<number | null>(null);
-  const [editingFixedExamIndex, setEditingFixedExamIndex] = useState<number | null>(null);
+  const [setupStatus, setSetupStatus] = useState("Draft in progress.");
+  const [actionStatus, setActionStatus] = useState("Ready.");
+  const [collapsedSidebar, setCollapsedSidebar] = useState(false);
+  const [activeRoute, setActiveRoute] = useState<AppRoute>("setup");
+  const [activeStep, setActiveStep] = useState<SetupStep>("setup");
+  const [selectedScheduleSolutionId, setSelectedScheduleSolutionId] = useState<string | null>(null);
+  const [selectedScheduleMoedNumber, setSelectedScheduleMoedNumber] = useState<number>(1);
+  const [selectedScheduleExamKey, setSelectedScheduleExamKey] = useState<string | null>(null);
+  const [selectedSchedulePreviewDate, setSelectedSchedulePreviewDate] = useState<string | null>(null);
+  const [scheduleDepartmentFilter, setScheduleDepartmentFilter] = useState<"all" | "sw" | "is">("all");
+  const [excludedDraftRange, setExcludedDraftRange] = useState<DateRange | undefined>();
+  const [excludedReason, setExcludedReason] = useState("");
+  const [fixedDraft, setFixedDraft] = useState<FixedDraft>({
+    course_code: "",
+    course_name: "",
+    exam_date: "",
+    department: null,
+    prerequisite_course_codes: [],
+  });
+  const [courseDraft, setCourseDraft] = useState<CourseDraft>({
+    course_code: "",
+    course_name: "",
+    semester_number: 1,
+    high_failure_rate: false,
+    department: null,
+    prerequisite_course_codes: [],
+  });
   const [editingCourseIndex, setEditingCourseIndex] = useState<number | null>(null);
-  const [courseImportIssues, setCourseImportIssues] = useState<ValidationIssue[]>([]);
-  const [moveDrafts, setMoveDrafts] = useState<Record<string, string>>({});
-  const [movingExamKey, setMovingExamKey] = useState<string | null>(null);
-  const [selectedSolutionId, setSelectedSolutionId] = useState<string | null>(null);
-  const [selectedExamKey, setSelectedExamKey] = useState<string | null>(null);
-  const [selectedPreviewDate, setSelectedPreviewDate] = useState<string | null>(null);
-  const [previewResponses, setPreviewResponses] = useState<Record<string, PreviewResponse>>({});
+  const [solveAbortController, setSolveAbortController] = useState<AbortController | null>(null);
+  const [schedulePreviewResponses, setSchedulePreviewResponses] = useState<Record<string, PreviewResponse>>({});
   const [previewLoading, setPreviewLoading] = useState(false);
-  const [showChanges, setShowChanges] = useState(false);
-  const [calendarDepartmentFilter, setCalendarDepartmentFilter] = useState<"all" | "sw" | "is">("all");
-  const [selectedCalendarMoedNumber, setSelectedCalendarMoedNumber] = useState<number>(1);
-  const [graphFocusCourseCode, setGraphFocusCourseCode] = useState<string | null>(null);
-  const [activeWorkspaceTab, setActiveWorkspaceTab] = useState<"calendar" | "compare" | "graph">("calendar");
-  const [activeRoute, setActiveRoute] = useState<AppRoute>(initialLocation.route);
-  const [activeSetupSection, setActiveSetupSection] = useState<SetupStep | null>(initialLocation.section);
-  const [setupExpanded, setSetupExpanded] = useState<boolean>(initialLocation.route === "/setup");
-  const [collapsedSetupYears, setCollapsedSetupYears] = useState<Record<string, boolean>>({});
-  const [selectedCourseFileName, setSelectedCourseFileName] = useState<string>("");
-  const [coursesListCollapsed, setCoursesListCollapsed] = useState(false);
-  const [selectedConflictKey, setSelectedConflictKey] = useState<string | null>(null);
-  const [showSolveSuccessModal, setShowSolveSuccessModal] = useState(false);
-  const courseImportInputRef = useRef<HTMLInputElement | null>(null);
-  const setupSectionRefs = useRef<Partial<Record<SetupStep, HTMLElement | null>>>({});
+  const [showConflictDrawer, setShowConflictDrawer] = useState(true);
+  const [activeConflict, setActiveConflict] = useState<ValidationIssue | null>(null);
+  const [authUserId, setAuthUserId] = useState<string | null>(() => getStoredAuthUserId());
+  const [remoteSavedSetups, setRemoteSavedSetups] = useState<RemoteSavedSetupSummary[]>([]);
 
-  const courseNameByCode = Object.fromEntries(project.courses.map((course) => [course.course_code, course.course_name]));
-  const courseByCode = Object.fromEntries(project.courses.map((course) => [course.course_code, course]));
-  const calendarDays = buildCalendarDays(project, selectedCalendarMoedNumber);
-  const calendarDayKey = calendarDays.join("|");
-  const semesterRows = Array.from(new Set(project.courses.map((course) => course.semester_number))).sort((left, right) => left - right);
-  const activeSolution = project.solutions.find((solution) => solution.solution_id === selectedSolutionId) ?? project.solutions[0] ?? null;
-  const selectedExam = activeSolution && selectedExamKey
-    ? activeSolution.exams.find((exam) => getExamMoveKey(activeSolution.solution_id, exam.course_code, exam.moed_number) === selectedExamKey) ?? null
-    : null;
-  const selectedCourse = selectedExam ? courseByCode[selectedExam.course_code] : null;
-  const dependencyEdges = buildDependencyEdges(project);
-  const allSavedSetups = Object.values(setupLibrary).flat();
-  const currentSavedSetup = project.setup_entry_id
-    ? allSavedSetups.find((entry) => entry.entry_id === project.setup_entry_id) ?? null
-    : null;
-  const hasInitialSetup = Boolean(project.setup_entry_id);
-  const sortedSetupYears = Object.keys(setupLibrary).sort((left, right) => Number(right) - Number(left));
-  const [isEditingInitialSetup, setIsEditingInitialSetup] = useState<boolean>(() => !project.setup_entry_id);
-
-  useEffect(() => {
-    if (window.location.pathname === "/") {
-      window.history.replaceState({}, "", "/setup");
-      setActiveRoute("/setup");
-    }
-
-    const handlePopState = () => {
-      const nextLocation = readRouteFromLocation();
-      setActiveRoute(nextLocation.route);
-      setActiveSetupSection(nextLocation.section);
-      setSetupExpanded(nextLocation.route === "/setup");
-    };
-
-    window.addEventListener("popstate", handlePopState);
-    return () => window.removeEventListener("popstate", handlePopState);
-  }, []);
-
-  useEffect(() => {
-    if (activeRoute !== "/setup") {
-      return;
-    }
-
-    if (activeSetupSection) {
-      setupSectionRefs.current[activeSetupSection]?.scrollIntoView({ behavior: "smooth", block: "start" });
-      return;
-    }
-
-    window.scrollTo({ top: 0, behavior: "smooth" });
-  }, [activeRoute, activeSetupSection]);
+  const isSolveInProgress = busyAction === "solve";
 
   useEffect(() => {
     saveProject(project);
   }, [project]);
 
   useEffect(() => {
+    if (!getStoredAuthToken()) {
+      return;
+    }
+
+    if (!authUserId) {
+      setAuthUserId(getStoredAuthUserId());
+    }
+
+    void (async () => {
+      try {
+        const setups = await listRemoteSavedSetups();
+        setRemoteSavedSetups(setups);
+      } catch {
+        setActionStatus("Saved setup service is unavailable or not authenticated.");
+      }
+    })();
+  }, [authUserId]);
+
+  const remoteSetupsByYear = useMemo(() => {
+    return remoteSavedSetups.reduce<Record<string, RemoteSavedSetupSummary[]>>((groups, setup) => {
+      const yearKey = String(setup.year);
+      if (!groups[yearKey]) {
+        groups[yearKey] = [];
+      }
+      groups[yearKey].push(setup);
+      return groups;
+    }, {});
+  }, [remoteSavedSetups]);
+
+  const sortedRemoteYears = useMemo(
+    () => Object.keys(remoteSetupsByYear).sort((left, right) => Number(right) - Number(left)),
+    [remoteSetupsByYear],
+  );
+
+  const allCourseCodes = useMemo(
+    () => Array.from(new Set(project.courses.map((course) => course.course_code))).sort(),
+    [project.courses],
+  );
+
+  const selectedScheduleSolution = useMemo(
+    () => project.solutions.find((solution) => solution.solution_id === selectedScheduleSolutionId) ?? project.solutions[0] ?? null,
+    [project.solutions, selectedScheduleSolutionId],
+  );
+  const selectedScheduleExam = useMemo(
+    () =>
+      selectedScheduleSolution && selectedScheduleExamKey
+        ? selectedScheduleSolution.exams.find((exam) => getExamMoveKey(selectedScheduleSolution.solution_id, exam.course_code, exam.moed_number) === selectedScheduleExamKey) ?? null
+        : null,
+    [selectedScheduleSolution, selectedScheduleExamKey],
+  );
+
+  const selectedScheduleOriginalDate = useMemo(() => {
+    if (!selectedScheduleSolution || !selectedScheduleExam) {
+      return null;
+    }
+
+    return (
+      selectedScheduleSolution.original_exams?.find(
+        (exam) => exam.course_code === selectedScheduleExam.course_code && exam.moed_number === selectedScheduleExam.moed_number,
+      )?.exam_date ?? selectedScheduleExam.exam_date
+    );
+  }, [selectedScheduleExam, selectedScheduleSolution]);
+
+  const courseByCode = useMemo(() => {
+    const map = Object.fromEntries(project.courses.map((course) => [course.course_code, course])) as Record<string, CourseInput>;
+    if (Object.keys(map).length > 0) {
+      return map;
+    }
+
+    for (const solution of project.solutions) {
+      for (const exam of solution.exams) {
+        if (map[exam.course_code]) {
+          continue;
+        }
+
+        map[exam.course_code] = {
+          course_code: exam.course_code,
+          course_name: exam.course_code,
+          semester_number: inferSemesterFromCourseCode(exam.course_code),
+          high_failure_rate: false,
+          department: null,
+          prerequisite_course_codes: [],
+        };
+      }
+    }
+
+    return map;
+  }, [project.courses, project.solutions]);
+
+  const courseNameByCode = useMemo(
+    () => Object.fromEntries(Object.values(courseByCode).map((course) => [course.course_code, course.course_name])),
+    [courseByCode],
+  );
+
+  const scheduleSemesterRows = useMemo(
+    () => Array.from(new Set(Object.values(courseByCode).map((course) => course.semester_number))).sort((left, right) => left - right),
+    [courseByCode],
+  );
+
+  const scheduleCalendarDays = useMemo(
+    () => buildCalendarDays(project, selectedScheduleMoedNumber),
+    [project, selectedScheduleMoedNumber],
+  );
+
+  const selectedScheduleMoedWindow = useMemo(
+    () => project.moed_windows.find((window) => window.moed_number === selectedScheduleMoedNumber) ?? null,
+    [project.moed_windows, selectedScheduleMoedNumber],
+  );
+
+  const selectedScheduleConflictIssues = useMemo(() => {
+    if (!selectedScheduleSolution || !selectedScheduleMoedWindow) {
+      return [] as ValidationIssue[];
+    }
+
+    return selectedScheduleSolution.issues.filter((issue) => {
+      if (issue.related_date) {
+        return selectedScheduleMoedWindow.start_date <= issue.related_date && issue.related_date <= selectedScheduleMoedWindow.end_date;
+      }
+
+      if (!issue.related_course_code) {
+        return true;
+      }
+
+      return selectedScheduleSolution.exams.some(
+        (exam) =>
+          exam.course_code === issue.related_course_code
+          && exam.moed_number === selectedScheduleMoedNumber,
+      );
+    });
+  }, [selectedScheduleMoedNumber, selectedScheduleMoedWindow, selectedScheduleSolution]);
+
+  useEffect(() => {
     if (project.solutions.length === 0) {
-      setSelectedSolutionId(null);
-      setSelectedExamKey(null);
-      setSelectedPreviewDate(null);
+      setSelectedScheduleSolutionId(null);
+      setSelectedScheduleExamKey(null);
+      setSelectedSchedulePreviewDate(null);
       return;
     }
 
-    if (!selectedSolutionId || !project.solutions.some((solution) => solution.solution_id === selectedSolutionId)) {
-      setSelectedSolutionId(project.solutions[0].solution_id);
+    if (!selectedScheduleSolutionId || !project.solutions.some((solution) => solution.solution_id === selectedScheduleSolutionId)) {
+      setSelectedScheduleSolutionId(project.solutions[0].solution_id);
     }
-  }, [project.solutions, selectedSolutionId]);
+  }, [project.solutions, selectedScheduleSolutionId]);
 
   useEffect(() => {
-    const availableMoedNumbers = project.moed_windows.map((window) => window.moed_number);
-    if (!availableMoedNumbers.includes(selectedCalendarMoedNumber)) {
-      setSelectedCalendarMoedNumber(availableMoedNumbers[0] ?? 1);
+    if (selectedScheduleExam && selectedScheduleExam.moed_number !== selectedScheduleMoedNumber) {
+      setSelectedScheduleExamKey(null);
+      setSelectedSchedulePreviewDate(null);
     }
-  }, [project.moed_windows, selectedCalendarMoedNumber]);
+  }, [selectedScheduleExam, selectedScheduleMoedNumber]);
 
   useEffect(() => {
-    if (selectedExam && selectedExam.moed_number !== selectedCalendarMoedNumber) {
-      setSelectedExamKey(null);
-      setSelectedPreviewDate(null);
-      setSelectedConflictKey(null);
+    const availableMoeds = project.moed_windows.map((window) => window.moed_number);
+    if (!availableMoeds.includes(selectedScheduleMoedNumber)) {
+      setSelectedScheduleMoedNumber(availableMoeds[0] ?? 1);
     }
-  }, [selectedCalendarMoedNumber, selectedExam]);
+  }, [project.moed_windows, selectedScheduleMoedNumber]);
 
   useEffect(() => {
-    setPreviewResponses({});
-  }, [selectedSolutionId, selectedExamKey, project.solutions]);
+    setSchedulePreviewResponses({});
+    if (!selectedScheduleExam) {
+      setSelectedSchedulePreviewDate(null);
+      return;
+    }
+    setSelectedSchedulePreviewDate(selectedScheduleExam.exam_date);
+  }, [selectedScheduleExam?.course_code, selectedScheduleExam?.moed_number, selectedScheduleExam?.exam_date]);
 
   useEffect(() => {
-    setSelectedPreviewDate(null);
-    setSelectedConflictKey(null);
-  }, [selectedSolutionId, project.solutions]);
-
-  useEffect(() => {
-    if (!activeSolution || !selectedExam) {
+    if (selectedScheduleConflictIssues.length === 0) {
+      setActiveConflict(null);
       return;
     }
 
-    let ignore = false;
+    if (activeConflict && selectedScheduleConflictIssues.some((issue) => getIssueKey(issue) === getIssueKey(activeConflict))) {
+      return;
+    }
+
+    setActiveConflict(selectedScheduleConflictIssues[0]);
+  }, [activeConflict, selectedScheduleConflictIssues]);
+
+  useEffect(() => {
+    if (!selectedScheduleSolution || !selectedScheduleExam || busyAction === "solve") {
+      return;
+    }
+
+    const selectedCourse = courseByCode[selectedScheduleExam.course_code];
+    if (!selectedCourse) {
+      return;
+    }
+
+    const targetDates = scheduleCalendarDays.filter((dateText) => dateText !== selectedScheduleExam.exam_date);
+    if (targetDates.length === 0) {
+      return;
+    }
+
+    const abortController = new AbortController();
     setPreviewLoading(true);
 
-    Promise.all(
-      calendarDays.map(async (dateText) => {
-        const previewKey = getPreviewKey(activeSolution.solution_id, selectedExam.course_code, selectedExam.moed_number, dateText);
-        const response = await explainMoveProject(project, activeSolution.solution_id, selectedExam.course_code, selectedExam.moed_number, dateText);
-        return [previewKey, response] as const;
-      }),
-    )
-      .then((results) => {
-        if (!ignore) {
-          setPreviewResponses(Object.fromEntries(results));
-        }
-      })
-      .catch((error) => {
-        if (!ignore) {
-          setStatus(error instanceof Error ? error.message : "Move preview failed.");
-        }
-      })
-      .finally(() => {
-        if (!ignore) {
-          setPreviewLoading(false);
-        }
-      });
+    void (async () => {
+      const previewEntries = await Promise.all(
+        targetDates.map(async (dateText) => {
+          const key = getPreviewKey(
+            selectedScheduleSolution.solution_id,
+            selectedScheduleExam.course_code,
+            selectedScheduleExam.moed_number,
+            dateText,
+          );
+
+          try {
+            const response = await explainMoveProject(
+              project,
+              selectedScheduleSolution.solution_id,
+              selectedScheduleExam.course_code,
+              selectedScheduleExam.moed_number,
+              dateText,
+            );
+            return [key, response as PreviewResponse] as const;
+          } catch {
+            return null;
+          }
+        }),
+      );
+
+      if (abortController.signal.aborted) {
+        return;
+      }
+
+      setSchedulePreviewResponses(Object.fromEntries(previewEntries.filter((entry): entry is readonly [string, PreviewResponse] => entry !== null)));
+      setPreviewLoading(false);
+    })();
 
     return () => {
-      ignore = true;
+      abortController.abort();
+      setPreviewLoading(false);
     };
-  }, [activeSolution, calendarDayKey, project, selectedExam]);
+  }, [
+    busyAction,
+    courseByCode,
+    project,
+    scheduleCalendarDays,
+    selectedScheduleExam,
+    selectedScheduleSolution,
+  ]);
+
+  const completion = useMemo(() => {
+    const checks = [
+      Boolean(project.project_name.trim().length > 0 && project.moed_windows.length > 0),
+      project.excluded_ranges.length > 0,
+      project.fixed_exams.length > 0,
+      project.courses.length > 0,
+    ];
+    const done = checks.filter(Boolean).length;
+    return {
+      done,
+      total: checks.length,
+      percentage: Math.round((done / checks.length) * 100),
+    };
+  }, [project]);
+
+  const sidebarItems = useMemo(
+    () => [
+      {
+        key: "setup",
+        title: "Setup",
+        icon: FolderKanban,
+        complete: completion.done === completion.total,
+        children: [
+          {
+            key: "setup",
+            title: "Initial Setup",
+            icon: Sparkles,
+            complete: Boolean(project.project_name.trim().length > 0 && project.moed_windows.length > 0),
+          },
+          {
+            key: "excluded",
+            title: "Excluded Dates",
+            icon: CalendarDays,
+            complete: project.excluded_ranges.length > 0,
+          },
+          {
+            key: "fixed",
+            title: "Fixed Exams",
+            icon: Lock,
+            complete: project.fixed_exams.length > 0,
+          },
+          {
+            key: "courses",
+            title: "Courses",
+            icon: BookOpen,
+            complete: project.courses.length > 0,
+          },
+        ],
+      },
+      {
+        key: "schedule",
+        title: "Schedule",
+        icon: CalendarCheck,
+        complete: project.solutions.length > 0,
+        disabled: project.solutions.length === 0,
+      },
+    ],
+    [completion.done, completion.total, project.courses.length, project.excluded_ranges.length, project.fixed_exams.length, project.project_name, project.moed_windows.length, project.solutions.length],
+  );
+
+  const courseColumns = useMemo<ColumnDef<CourseInput>[]>(
+    () => [
+      {
+        accessorKey: "course_code",
+        header: ({ column }) => (
+          <Button type="button" variant="ghost" onClick={() => column.toggleSorting(column.getIsSorted() === "asc")}>Code <ArrowUpDown className="h-3.5 w-3.5" /></Button>
+        ),
+      },
+      {
+        accessorKey: "course_name",
+        header: ({ column }) => (
+          <Button type="button" variant="ghost" onClick={() => column.toggleSorting(column.getIsSorted() === "asc")}>Name <ArrowUpDown className="h-3.5 w-3.5" /></Button>
+        ),
+      },
+      {
+        accessorKey: "semester_number",
+        header: "Semester",
+      },
+      {
+        accessorKey: "department",
+        header: "Department",
+        cell: ({ row }) => row.original.department ?? "ALL",
+      },
+      {
+        accessorKey: "high_failure_rate",
+        header: "High Failure",
+        cell: ({ row }) =>
+          row.original.high_failure_rate ? (
+            <Badge variant="destructive" className="bg-red-100 text-red-700">Yes</Badge>
+          ) : (
+            <Badge variant="secondary">No</Badge>
+          ),
+      },
+      {
+        accessorKey: "prerequisite_course_codes",
+        header: "Prerequisites",
+        cell: ({ row }) => (row.original.prerequisite_course_codes.length > 0 ? row.original.prerequisite_course_codes.join(", ") : "-"),
+      },
+      {
+        id: "actions",
+        header: "",
+        cell: ({ row }) => (
+          <DropdownMenu>
+            <DropdownMenuTrigger asChild>
+              <Button type="button" variant="ghost" size="icon" className="opacity-70 hover:opacity-100">
+                <MoreHorizontal className="h-4 w-4" />
+              </Button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="end">
+              <DropdownMenuItem
+                onSelect={() => {
+                  const index = project.courses.findIndex((course) => course.course_code === row.original.course_code && course.course_name === row.original.course_name);
+                  if (index >= 0) {
+                    setEditingCourseIndex(index);
+                    setCourseDraft({ ...project.courses[index] });
+                    setActiveRoute("setup");
+                    setActiveStep("courses");
+                  }
+                }}
+              >
+                <Pencil className="mr-2 h-4 w-4" />
+                Edit
+              </DropdownMenuItem>
+              <DropdownMenuItem
+                className="text-red-600 focus:text-red-700"
+                onSelect={() => {
+                  if (isSolveInProgress) {
+                    return;
+                  }
+                  setProject((current) => ({
+                    ...current,
+                    courses: current.courses.filter((course) => !(course.course_code === row.original.course_code && course.course_name === row.original.course_name)),
+                    solutions: [],
+                    issues: [],
+                  }));
+                }}
+              >
+                <Trash className="mr-2 h-4 w-4" />
+                Delete
+              </DropdownMenuItem>
+            </DropdownMenuContent>
+          </DropdownMenu>
+        ),
+      },
+    ],
+    [isSolveInProgress, project.courses],
+  );
 
   function patchProject(patch: Partial<ScheduleProject>) {
+    if (isSolveInProgress) {
+      setActionStatus("Cannot edit setup while generating solutions. Terminate generation first.");
+      return;
+    }
     setProject((current) => ({ ...current, ...patch, solutions: [], issues: [] }));
-    setStatus("Draft updated locally.");
+    setSetupStatus("Setup changes saved locally.");
   }
 
-  function buildSavedSetupEntry(): SavedSetupEntry {
-    const startYear = Number(project.moed_windows[0]?.start_date.slice(0, 4));
-    const savedAt = new Date().toISOString();
-
-    return {
-      entry_id: project.setup_entry_id ?? `setup-${savedAt}`,
-      year: Number.isFinite(startYear) ? startYear : new Date().getFullYear(),
-      project_name: project.project_name,
-      moed_windows: project.moed_windows.map((window) => ({ ...window })),
-      constraint_config: { ...project.constraint_config },
-      saved_at: savedAt,
-    };
-  }
-
-  function handleSaveInitialSetup() {
-    const savedEntry = buildSavedSetupEntry();
-    const nextLibrary = upsertSetupEntry(savedEntry);
-
-    setSetupLibrary(nextLibrary);
-    setProject((current) => ({
-      ...current,
-      setup_entry_id: savedEntry.entry_id,
-      initial_setup_saved_at: savedEntry.saved_at,
-      solutions: [],
-      issues: [],
-    }));
-    setIsEditingInitialSetup(false);
-    setStatus(`Saved initial setup under ${savedEntry.year}.`);
-  }
-
-  function handleUseSavedSetup(entry: SavedSetupEntry) {
-    const emptyProject = createEmptyProject();
-
-    setProject({
-      ...emptyProject,
-      project_name: entry.project_name,
-      moed_windows: entry.moed_windows.map((window) => ({ ...window })),
-      constraint_config: { ...entry.constraint_config },
-      setup_entry_id: entry.entry_id,
-      initial_setup_saved_at: entry.saved_at,
-    });
-    setEditingExcludedIndex(null);
-    setEditingFixedExamIndex(null);
-    setEditingCourseIndex(null);
-    setSelectedSolutionId(null);
-    setSelectedExamKey(null);
-    setSelectedPreviewDate(null);
-    setGraphFocusCourseCode(null);
-    setCourseImportIssues([]);
-    setIsEditingInitialSetup(false);
-    navigateTo("/setup", "project");
-    setStatus(`Loaded saved setup from ${entry.year}.`);
-  }
-
-  function handleDeleteSavedSetup(entry: SavedSetupEntry) {
-    const nextLibrary = deleteSetupEntry(entry.entry_id);
-    setSetupLibrary(nextLibrary);
-
-    if (project.setup_entry_id === entry.entry_id) {
-      setProject((current) => ({
-        ...current,
-        setup_entry_id: null,
-        initial_setup_saved_at: null,
-        solutions: [],
-        issues: [],
-      }));
-      setIsEditingInitialSetup(true);
-      navigateTo("/setup", "project");
-      setStatus(`Deleted saved setup ${entry.project_name}. The current entry is now unsaved.`);
+  async function handleLogin() {
+    const userId = window.prompt("User ID", "orad")?.trim();
+    if (!userId) {
       return;
     }
 
-    setStatus(`Deleted saved setup ${entry.project_name}.`);
-  }
-
-  function navigateTo(route: AppRoute, section?: SetupStep | null) {
-    const nextUrl = route === "/setup" && section ? `${route}#${section}` : route;
-    if (`${window.location.pathname}${window.location.hash}` !== nextUrl) {
-      window.history.pushState({}, "", nextUrl);
+    const password = window.prompt("Password", "") ?? "";
+    if (!password) {
+      return;
     }
-
-    setActiveRoute(route);
-    setActiveSetupSection(route === "/setup" ? (section ?? null) : null);
-    setSetupExpanded(route === "/setup");
-  }
-
-  function formatFixedExamItem(exam: FixedExam): string {
-    const prerequisiteText = exam.prerequisite_course_codes.length > 0 ? exam.prerequisite_course_codes.join(", ") : "None";
-
-    return `${exam.course_code} - ${exam.course_name} - Prerequisites: ${prerequisiteText} - ${exam.exam_date}`;
-  }
-
-  function resetSetupEditors() {
-    setEditingExcludedIndex(null);
-    setEditingFixedExamIndex(null);
-    setEditingCourseIndex(null);
-  }
-
-  function saveExcludedRange(range: ExcludedDateRange) {
-    patchProject({
-      excluded_ranges:
-        editingExcludedIndex === null
-          ? [...project.excluded_ranges, range]
-          : project.excluded_ranges.map((currentRange, index) =>
-              index === editingExcludedIndex ? range : currentRange,
-            ),
-    });
-    setEditingExcludedIndex(null);
-  }
-
-  function removeExcludedRange(indexToRemove: number) {
-    patchProject({
-      excluded_ranges: project.excluded_ranges.filter((_, index) => index !== indexToRemove),
-    });
-    setEditingExcludedIndex(null);
-  }
-
-  function saveFixedExam(exam: FixedExam) {
-    patchProject({
-      fixed_exams:
-        editingFixedExamIndex === null
-          ? [...project.fixed_exams, exam]
-          : project.fixed_exams.map((currentExam, index) =>
-              index === editingFixedExamIndex ? exam : currentExam,
-            ),
-    });
-    setEditingFixedExamIndex(null);
-  }
-
-  function removeFixedExam(indexToRemove: number) {
-    patchProject({
-      fixed_exams: project.fixed_exams.filter((_, index) => index !== indexToRemove),
-    });
-    setEditingFixedExamIndex(null);
-  }
-
-  function saveCourse(course: CourseInput) {
-    setCourseImportIssues([]);
-    patchProject({
-      courses:
-        editingCourseIndex === null
-          ? [...project.courses, course]
-          : project.courses.map((currentCourse, index) => (index === editingCourseIndex ? course : currentCourse)),
-    });
-    setEditingCourseIndex(null);
-  }
-
-  function summarizeCourseImportIssues(issues: ValidationIssue[]): string {
-    const [firstIssue] = issues;
-    if (!firstIssue) {
-      return "Course import failed.";
-    }
-
-    return issues.length === 1
-      ? `Course import failed: ${firstIssue.message}`
-      : `Course import failed: ${firstIssue.message} (${issues.length} issues found)`;
-  }
-
-  function removeCourse(indexToRemove: number) {
-    setCourseImportIssues([]);
-    patchProject({
-      courses: project.courses.filter((_, index) => index !== indexToRemove),
-    });
-    setEditingCourseIndex(null);
-  }
-
-  function resetCourseList() {
-    setCourseImportIssues([]);
-    setSelectedCourseFileName("");
-    patchProject({ courses: [] });
-    setEditingCourseIndex(null);
-    setSelectedSolutionId(null);
-    setSelectedExamKey(null);
-    setSelectedPreviewDate(null);
-    setGraphFocusCourseCode(null);
-    setStatus("Course list reset.");
-  }
-
-  async function handleCourseImport(file: File) {
-    setBusyAction("import-courses");
-    setCourseImportIssues([]);
-    setSelectedCourseFileName(file.name);
-    setStatus(`Importing courses from ${file.name}...`);
 
     try {
-      const result: CourseImportResponse = await importCoursesSpreadsheet(file);
-
-      patchProject({ courses: result.courses });
-      resetSetupEditors();
-      setSelectedSolutionId(null);
-      setSelectedExamKey(null);
-      setSelectedPreviewDate(null);
-      setGraphFocusCourseCode(null);
-      setStatus(`Imported ${result.imported_count} courses from ${file.name}.`);
+      const response = await loginToBackend(userId, password);
+      setAuthUserId(response.user_id);
+      const setups = await listRemoteSavedSetups();
+      setRemoteSavedSetups(setups);
+      setActionStatus(`Authenticated as ${response.user_id}.`);
     } catch (error) {
-      if (Array.isArray(error)) {
-        const issues = error as ValidationIssue[];
-        setCourseImportIssues(issues);
-        setStatus(summarizeCourseImportIssues(issues));
-      } else {
-        setStatus(error instanceof Error ? error.message : "Course import failed.");
+      setActionStatus(formatApiErrorMessage(error, "Login failed."));
+    }
+  }
+
+  async function refreshRemoteSavedSetups() {
+    try {
+      const setups = await listRemoteSavedSetups();
+      setRemoteSavedSetups(setups);
+    } catch (error) {
+      setActionStatus(formatApiErrorMessage(error, "Failed to refresh saved setups."));
+    }
+  }
+
+  async function handleSaveSetupToDatabase() {
+    try {
+      const saved = await saveRemoteSetup(project, project.remote_setup_id, selectedScheduleSolutionId ?? null);
+      setProject((current) => ({ ...current, remote_setup_id: saved.setup_id }));
+      await refreshRemoteSavedSetups();
+      setActionStatus(`Saved setup '${saved.project_name}' to database.`);
+    } catch (error) {
+      setActionStatus(formatApiErrorMessage(error, "Failed to save setup to database."));
+    }
+  }
+
+  async function handleLoadSetupFromDatabase(setupId: string) {
+    if (isSolveInProgress) {
+      setActionStatus("Cannot load setup while generation is running.");
+      return;
+    }
+
+    try {
+      const payload = await loadRemoteSetup(setupId);
+      setProject({
+        ...payload.project,
+        remote_setup_id: payload.metadata.setup_id,
+      });
+      setActiveRoute("setup");
+      setActiveStep("setup");
+      setActionStatus(`Loaded '${payload.metadata.project_name}' from database.`);
+    } catch (error) {
+      setActionStatus(formatApiErrorMessage(error, "Failed to load setup from database."));
+    }
+  }
+
+  async function handleDeleteSetupFromDatabase(setupId: string) {
+    try {
+      await deleteRemoteSetup(setupId);
+      if (project.remote_setup_id === setupId) {
+        setProject((current) => ({ ...current, remote_setup_id: null }));
       }
-    } finally {
-      setBusyAction(null);
+      await refreshRemoteSavedSetups();
+      setActionStatus("Deleted setup from database.");
+    } catch (error) {
+      setActionStatus(formatApiErrorMessage(error, "Failed to delete setup from database."));
     }
   }
 
-  async function handleCourseTemplateDownload() {
-    setStatus("Downloading course template...");
+  function promptImportMode(): ImportMode | null {
+    const selected = window.prompt(
+      "Import mode? Type one: replace | append | merge",
+      "replace",
+    )?.trim().toLowerCase();
+
+    if (!selected) {
+      return null;
+    }
+    if (selected === "replace" || selected === "append" || selected === "merge") {
+      return selected;
+    }
+
+    setActionStatus("Invalid import mode. Use replace, append, or merge.");
+    return null;
+  }
+
+  function promptRemoteSetupSelection(actionLabel: string): string | null {
+    if (remoteSavedSetups.length === 0) {
+      setActionStatus("No remote saved setups available.");
+      return null;
+    }
+
+    const optionsText = remoteSavedSetups
+      .map((setup, index) => `${index + 1}. ${setup.project_name} (${setup.year})`)
+      .join("\n");
+
+    const rawSelection = window.prompt(`${actionLabel}\n${optionsText}\n\nType setup number:`, "1")?.trim();
+    if (!rawSelection) {
+      return null;
+    }
+
+    const index = Number(rawSelection) - 1;
+    if (!Number.isInteger(index) || index < 0 || index >= remoteSavedSetups.length) {
+      setActionStatus("Invalid setup selection.");
+      return null;
+    }
+
+    return remoteSavedSetups[index].setup_id;
+  }
+
+  function applyCoursesImportMode(existing: CourseInput[], incoming: CourseInput[], mode: ImportMode): CourseInput[] {
+    if (mode === "replace") {
+      return incoming;
+    }
+    if (mode === "append") {
+      return [...existing, ...incoming];
+    }
+
+    const merged = new Map(existing.map((course) => [course.course_code, course]));
+    for (const course of incoming) {
+      merged.set(course.course_code, course);
+    }
+    return Array.from(merged.values());
+  }
+
+  function applyFixedExamsImportMode(existing: FixedExam[], incoming: FixedExam[], mode: ImportMode): FixedExam[] {
+    if (mode === "replace") {
+      return incoming;
+    }
+    if (mode === "append") {
+      return [...existing, ...incoming];
+    }
+
+    const merged = new Map(existing.map((exam) => [exam.course_code, exam]));
+    for (const exam of incoming) {
+      merged.set(exam.course_code, exam);
+    }
+    return Array.from(merged.values());
+  }
+
+  async function handleImportCoursesFromSavedSetup() {
+    const setupId = promptRemoteSetupSelection("Select saved setup to import courses from");
+    if (!setupId) {
+      return;
+    }
+
+    const mode = promptImportMode();
+    if (!mode) {
+      return;
+    }
 
     try {
-      const blob = await downloadCourseTemplate();
-      const objectUrl = window.URL.createObjectURL(blob);
-      const link = document.createElement("a");
-
-      link.href = objectUrl;
-      link.download = "course-import-template.xlsx";
-      document.body.append(link);
-      link.click();
-      link.remove();
-      window.URL.revokeObjectURL(objectUrl);
-      setStatus("Course template downloaded.");
+      const incomingCourses = await loadRemoteSetupCourses(setupId);
+      const nextCourses = applyCoursesImportMode(project.courses, incomingCourses, mode);
+      patchProject({ courses: nextCourses });
+      setActionStatus(`Imported ${incomingCourses.length} courses using ${mode} mode.`);
     } catch (error) {
-      setStatus(error instanceof Error ? error.message : "Course template download failed.");
+      setActionStatus(formatApiErrorMessage(error, "Failed to import courses from saved setup."));
+    }
+  }
+
+  async function handleImportFixedExamsFromSavedSetup() {
+    const setupId = promptRemoteSetupSelection("Select saved setup to import fixed exams from");
+    if (!setupId) {
+      return;
+    }
+
+    const mode = promptImportMode();
+    if (!mode) {
+      return;
+    }
+
+    try {
+      const incomingFixedExams = await loadRemoteSetupFixedExams(setupId);
+      const nextFixedExams = applyFixedExamsImportMode(project.fixed_exams, incomingFixedExams, mode);
+      patchProject({ fixed_exams: nextFixedExams });
+      setActionStatus(`Imported ${incomingFixedExams.length} fixed exams using ${mode} mode.`);
+    } catch (error) {
+      setActionStatus(formatApiErrorMessage(error, "Failed to import fixed exams from saved setup."));
+    }
+  }
+
+  async function handleSaveSelectedSolutionToDatabase() {
+    if (!project.remote_setup_id) {
+      setActionStatus("Save this setup to database first.");
+      return;
+    }
+    if (!selectedScheduleSolutionId) {
+      setActionStatus("Select a solution before saving solution updates.");
+      return;
+    }
+
+    try {
+      await updateRemoteSetupSolutions(project.remote_setup_id, project.solutions, selectedScheduleSolutionId);
+      await refreshRemoteSavedSetups();
+      setActionStatus("Saved solution updates to database.");
+    } catch (error) {
+      setActionStatus(formatApiErrorMessage(error, "Failed to save solution updates."));
     }
   }
 
   async function handleValidate() {
     setBusyAction("validate");
-    setStatus("Checking project rules...");
+    setActionStatus("Checking project rules...");
     try {
       const validatedProject = await validateProject(project);
-      setProject((current) => ({
-        ...validatedProject,
-        setup_entry_id: current.setup_entry_id,
-        initial_setup_saved_at: current.initial_setup_saved_at,
-      }));
-      setStatus("Validation finished.");
+      setProject(validatedProject);
+      setActionStatus("Validation finished.");
     } catch (error) {
-      setStatus(error instanceof Error ? error.message : "Validation failed.");
+      setActionStatus(formatApiErrorMessage(error, "Validation failed."));
     } finally {
       setBusyAction(null);
     }
   }
 
   async function handleSolve() {
+    const abortController = new AbortController();
     setBusyAction("solve");
-    setStatus("Generating schedule options...");
+    setSolveAbortController(abortController);
+    setActionStatus("Generating schedule options...");
     try {
-      const solved = await solveProject(project);
+      const solved = await solveProject(project, { signal: abortController.signal });
+      const solutions = solved.solutions as ScheduleProject["solutions"];
       const solveIssues = solved.issues as ValidationIssue[];
-      const nextSolutions = (solved.solutions as ScheduleProject["solutions"]).map((solution) => ({
-        ...solution,
-        original_exams: solution.original_exams ?? solution.exams.map((exam) => ({ ...exam })),
-        original_score: solution.original_score ?? solution.score,
-        original_diagnostics: solution.original_diagnostics ?? solution.diagnostics,
-      }));
-
       setProject((current) => ({
         ...current,
-        solutions: nextSolutions,
+        solutions,
         issues: solveIssues,
       }));
-
-      if (nextSolutions.length === 0) {
-        setShowSolveSuccessModal(false);
-        setStatus(solveIssues[0]?.message ?? "No feasible solution was found.");
-        return;
+      if (solutions.length > 0) {
+        setActiveRoute("schedule");
+        setActionStatus(`Generated ${solutions.length} option(s).`);
+      } else {
+        const issueMessages = Array.from(
+          new Set(
+            solveIssues
+              .map((issue) => issue.message.trim())
+              .filter((message) => message.length > 0),
+          ),
+        );
+        const reasonText = issueMessages.length > 0
+          ? issueMessages.join(" | ")
+          : "No feasible schedule was found for the current constraints.";
+        setActionStatus(`No options generated. ${reasonText}`);
       }
-
-      setSelectedSolutionId(nextSolutions[0]?.solution_id ?? null);
-      setSelectedExamKey(null);
-      setGraphFocusCourseCode(null);
-      navigateTo("/schedule");
-      setShowSolveSuccessModal(nextSolutions.length > 0);
-      setStatus(`Generated ${nextSolutions.length} schedule option${nextSolutions.length === 1 ? "" : "s"}.`);
     } catch (error) {
-      setStatus(error instanceof Error ? error.message : "Solve failed.");
+      if (error instanceof DOMException && error.name === "AbortError") {
+        setActionStatus("Generation terminated.");
+      } else {
+        setActionStatus(formatApiErrorMessage(error, "Solve failed."));
+      }
     } finally {
       setBusyAction(null);
+      setSolveAbortController(null);
     }
   }
 
-  async function handleManualMove(solution: ScheduleSolution, exam: ScheduledExam, explicitDate?: string) {
-    const moveKey = getExamMoveKey(solution.solution_id, exam.course_code, exam.moed_number);
-    const newDate = explicitDate ?? moveDrafts[moveKey] ?? exam.exam_date;
+  function handleTerminateSolve() {
+    solveAbortController?.abort();
+  }
 
-    if (newDate === exam.exam_date) {
-      setStatus(`Select a new date for ${exam.course_code} before moving it.`);
+  async function handleManualMove(exam: { course_code: string; moed_number: number; exam_date: string }, nextDate: string) {
+    if (!selectedScheduleSolution) {
       return;
     }
 
     setBusyAction("manual-move");
-    setMovingExamKey(moveKey);
-    setStatus(`Validating manual move for ${exam.course_code}...`);
+    setActionStatus(`Moving ${exam.course_code} to ${formatDisplayDate(nextDate)}...`);
 
     try {
-      const response = await manualMoveProject(project, solution.solution_id, exam.course_code, exam.moed_number, newDate);
+      const response = await manualMoveProject(project, selectedScheduleSolution.solution_id, exam.course_code, exam.moed_number, nextDate);
+      if (!response.updated_solution) {
+        const issueText = response.issues.map((issue) => issue.message).join(" | ");
+        setActionStatus(issueText || "Manual move could not be applied.");
+        return;
+      }
 
       setProject((current) => ({
         ...current,
-        solutions: current.solutions.map((currentSolution) => {
-          if (currentSolution.solution_id !== solution.solution_id) {
-            return currentSolution;
-          }
-
-          const preservedOriginalExams = currentSolution.original_exams ?? currentSolution.exams.map((currentExam) => ({ ...currentExam }));
-          const preservedOriginalScore = currentSolution.original_score ?? currentSolution.score;
-          const preservedOriginalDiagnostics = currentSolution.original_diagnostics ?? currentSolution.diagnostics;
-
-          if (response.valid && response.updated_solution) {
-            return {
-              ...currentSolution,
-              ...response.updated_solution,
-              issues: response.issues,
-              original_exams: preservedOriginalExams,
-              original_score: preservedOriginalScore,
-              original_diagnostics: preservedOriginalDiagnostics,
-            };
-          }
-
-          return {
-            ...currentSolution,
-            issues: response.issues,
-            original_exams: preservedOriginalExams,
-            original_score: preservedOriginalScore,
-            original_diagnostics: preservedOriginalDiagnostics,
-          };
-        }),
+        solutions: current.solutions.map((solution) =>
+          solution.solution_id === response.updated_solution?.solution_id
+            ? {
+                ...solution,
+                score: response.updated_solution.score,
+                exams: response.updated_solution.exams,
+                diagnostics: response.updated_solution.diagnostics,
+                issues: response.issues,
+              }
+            : solution,
+        ),
+        issues: response.issues,
       }));
 
-      setMoveDrafts((current) => ({
-        ...current,
-        [moveKey]: newDate,
-      }));
-      setSelectedPreviewDate(newDate);
-      setStatus(
-        response.valid
-          ? `Moved ${exam.course_code} to ${newDate}.`
-          : `Move rejected for ${exam.course_code}. Review the reported issues.`,
-      );
+      setSelectedSchedulePreviewDate(nextDate);
+      setSchedulePreviewResponses({});
+      setActionStatus(`Moved ${exam.course_code} to ${formatDisplayDate(nextDate)}.`);
     } catch (error) {
-      setStatus(error instanceof Error ? error.message : "Manual move failed.");
+      setActionStatus(formatApiErrorMessage(error, "Manual move failed."));
     } finally {
       setBusyAction(null);
-      setMovingExamKey(null);
     }
   }
 
-  function handleResetSolution(solutionId: string) {
+  function openCourseEditorFromExam(exam: { course_code: string }) {
+    const index = project.courses.findIndex((course) => course.course_code === exam.course_code);
+    const fallback = courseByCode[exam.course_code];
+
+    if (index >= 0) {
+      setEditingCourseIndex(index);
+      setCourseDraft({ ...project.courses[index] });
+    } else {
+      setEditingCourseIndex(null);
+      setCourseDraft({
+        course_code: exam.course_code,
+        course_name: fallback?.course_name ?? exam.course_code,
+        semester_number: fallback?.semester_number ?? 1,
+        high_failure_rate: fallback?.high_failure_rate ?? false,
+        department: fallback?.department ?? null,
+        prerequisite_course_codes: fallback?.prerequisite_course_codes ?? [],
+      });
+    }
+
+    setActiveRoute("setup");
+    setActiveStep("courses");
+    setSetupStatus(`Editing course ${exam.course_code}.`);
+  }
+
+  function lockExamFromCalendar(exam: { course_code: string; exam_date: string }) {
+    if (isSolveInProgress) {
+      return;
+    }
+
+    const course = courseByCode[exam.course_code];
+    const lockedExam: FixedExam = {
+      course_code: exam.course_code,
+      course_name: course?.course_name ?? exam.course_code,
+      exam_date: exam.exam_date,
+      locked: true,
+      department: course?.department ?? null,
+      prerequisite_course_codes: course?.prerequisite_course_codes ?? [],
+    };
+
     setProject((current) => ({
       ...current,
-      solutions: current.solutions.map((solution) => {
-        if (solution.solution_id !== solutionId || !solution.original_exams) {
-          return solution;
-        }
-
-        return {
-          ...solution,
-          exams: solution.original_exams.map((exam) => ({ ...exam })),
-          score: solution.original_score ?? solution.score,
-          diagnostics: solution.original_diagnostics ?? solution.diagnostics,
-          issues: [],
-        };
-      }),
+      fixed_exams: [...current.fixed_exams.filter((fixedExam) => fixedExam.course_code !== exam.course_code), lockedExam],
     }));
-    setSelectedPreviewDate(null);
-    setSelectedConflictKey(null);
-    setStatus(`Reset ${solutionId} back to its original solver schedule.`);
+    setActionStatus(`Locked ${exam.course_code} on ${formatDisplayDate(exam.exam_date)}.`);
   }
 
-  const previewResponse = activeSolution && selectedExam && selectedPreviewDate
-    ? previewResponses[getPreviewKey(activeSolution.solution_id, selectedExam.course_code, selectedExam.moed_number, selectedPreviewDate)]
-    : undefined;
-  const previewStatus = activeSolution && selectedExam && selectedPreviewDate
-    ? getPreviewStatus(activeSolution, selectedPreviewDate, selectedExam, previewResponse)
-    : "idle";
-  const previewIssues = previewResponse?.issues ?? [];
-  const activeConflict = previewIssues.find((issue) => getConflictKey(issue) === selectedConflictKey) ?? previewIssues[0] ?? null;
-  const changedCourseCodes = activeSolution
-    ? Array.from(new Set(activeSolution.exams.filter((exam) => hasExamChanged(activeSolution, exam.course_code, exam.moed_number)).map((exam) => exam.course_code)))
-    : [];
-
-  useEffect(() => {
-    if (previewIssues.length === 0) {
-      setSelectedConflictKey(null);
+  function unlockExamFromCalendar(exam: { course_code: string }) {
+    if (isSolveInProgress) {
       return;
     }
 
-    setSelectedConflictKey((current) => {
-      if (current && previewIssues.some((issue) => getConflictKey(issue) === current)) {
-        return current;
+    setProject((current) => ({
+      ...current,
+      fixed_exams: current.fixed_exams.filter((fixedExam) => fixedExam.course_code !== exam.course_code),
+    }));
+    setActionStatus(`Unlocked ${exam.course_code}.`);
+  }
+
+  function editExamDateFromCalendar(exam: { course_code: string; moed_number: number; exam_date: string }) {
+    if (isSolveInProgress) {
+      return;
+    }
+
+    const nextDateInput = window.prompt(`Enter new date for ${exam.course_code} (DD-MM-YYYY):`, formatDisplayDate(exam.exam_date))?.trim();
+    if (!nextDateInput) {
+      return;
+    }
+
+    const normalized = /^\d{2}-\d{2}-\d{4}$/.test(nextDateInput)
+      ? `${nextDateInput.slice(6, 10)}-${nextDateInput.slice(3, 5)}-${nextDateInput.slice(0, 2)}`
+      : nextDateInput;
+
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(normalized) || normalized === exam.exam_date) {
+      return;
+    }
+
+    void handleManualMove(exam, normalized);
+  }
+
+  function isExamLocked(exam: { course_code: string; exam_date: string }) {
+    return project.fixed_exams.some((fixedExam) => fixedExam.course_code === exam.course_code && fixedExam.exam_date === exam.exam_date);
+  }
+
+  async function handleCourseImport(file: File) {
+    setBusyAction("import-courses");
+    setActionStatus(`Importing courses from ${file.name}...`);
+
+    try {
+      const result: CourseImportResponse = await importCoursesSpreadsheet(file);
+      patchProject({ courses: result.courses, fixed_exams: result.fixed_exams });
+      setActionStatus(
+        `Imported ${result.imported_count} course(s) and ${result.fixed_exams_imported_count} fixed exam(s) from ${file.name}.`,
+      );
+    } catch (error) {
+      if (Array.isArray(error)) {
+        setActionStatus((error as ValidationIssue[]).map((issue) => issue.message).join(" | "));
+      } else {
+        setActionStatus(formatApiErrorMessage(error, "Course import failed."));
       }
+    } finally {
+      setBusyAction(null);
+    }
+  }
 
-      return getConflictKey(previewIssues[0]);
+  async function handleTemplateDownload() {
+    setActionStatus("Downloading template...");
+
+    try {
+      const blob = await downloadCourseTemplate();
+      const objectUrl = window.URL.createObjectURL(blob);
+      const anchor = document.createElement("a");
+
+      anchor.href = objectUrl;
+      anchor.download = "course-import-template.xlsx";
+      document.body.append(anchor);
+      anchor.click();
+      anchor.remove();
+      window.URL.revokeObjectURL(objectUrl);
+
+      setActionStatus("Template downloaded.");
+    } catch (error) {
+      setActionStatus(formatApiErrorMessage(error, "Course template download failed."));
+    }
+  }
+
+  function addExcludedRange() {
+    if (!excludedDraftRange?.from || !excludedDraftRange.to || excludedReason.trim().length === 0) {
+      setActionStatus("Select a date range and reason before adding an excluded range.");
+      return;
+    }
+
+    const nextRange: ExcludedDateRange = {
+      start_date: format(excludedDraftRange.from, "yyyy-MM-dd"),
+      end_date: format(excludedDraftRange.to, "yyyy-MM-dd"),
+      reason: excludedReason.trim(),
+    };
+
+    patchProject({ excluded_ranges: [...project.excluded_ranges, nextRange] });
+    setExcludedDraftRange(undefined);
+    setExcludedReason("");
+  }
+
+  function addFixedExam() {
+    if (!fixedDraft.course_code.trim() || !fixedDraft.course_name.trim() || !fixedDraft.exam_date) {
+      setActionStatus("Course code, name, and exam date are required for fixed exams.");
+      return;
+    }
+
+    const nextFixedExam: FixedExam = {
+      ...fixedDraft,
+      course_code: fixedDraft.course_code.trim(),
+      course_name: fixedDraft.course_name.trim(),
+      locked: true,
+    };
+
+    patchProject({ fixed_exams: [...project.fixed_exams, nextFixedExam] });
+    setFixedDraft({
+      course_code: "",
+      course_name: "",
+      exam_date: "",
+      department: null,
+      prerequisite_course_codes: [],
     });
-  }, [previewIssues]);
+  }
 
-  function handleFocusConflict(issue: ValidationIssue) {
-    if (!activeSolution) {
+  function saveCourseDraft() {
+    if (!courseDraft.course_code.trim() || !courseDraft.course_name.trim()) {
+      setActionStatus("Course code and course name are required.");
       return;
     }
 
-    setSelectedConflictKey(getConflictKey(issue));
+    if (editingCourseIndex === null) {
+      patchProject({ courses: [...project.courses, { ...courseDraft, course_code: courseDraft.course_code.trim(), course_name: courseDraft.course_name.trim() }] });
+    } else {
+      patchProject({
+        courses: project.courses.map((course, index) => (index === editingCourseIndex ? { ...courseDraft } : course)),
+      });
+    }
 
-    const targetCourseCode = issue.related_course_code ?? selectedExam?.course_code ?? null;
-    const targetExam = targetCourseCode
-      ? activeSolution.exams.find((exam) => {
-        if (exam.course_code !== targetCourseCode) {
-          return false;
-        }
+    setEditingCourseIndex(null);
+    setCourseDraft({
+      course_code: "",
+      course_name: "",
+      semester_number: 1,
+      high_failure_rate: false,
+      department: null,
+      prerequisite_course_codes: [],
+    });
+  }
 
-        if (issue.related_date) {
-          return exam.exam_date === issue.related_date;
-        }
-
-        return exam.moed_number === selectedCalendarMoedNumber;
-      }) ?? null
-      : null;
-
-    if (targetExam) {
-      setSelectedExamKey(getExamMoveKey(activeSolution.solution_id, targetExam.course_code, targetExam.moed_number));
-      setSelectedPreviewDate(issue.related_date ?? targetExam.exam_date);
-      setSelectedCalendarMoedNumber(targetExam.moed_number);
-      setGraphFocusCourseCode(targetExam.course_code);
+  function handleNewSetup() {
+    if (isSolveInProgress) {
+      setActionStatus("Cannot reset while generation is running.");
       return;
     }
 
-    if (issue.related_date) {
-      setSelectedPreviewDate(issue.related_date);
-    }
+    const emptyProject = createEmptyProject();
+    setProject(emptyProject);
+    setActiveRoute("setup");
+    setActiveStep("setup");
+
+    setEditingCourseIndex(null);
+    setExcludedDraftRange(undefined);
+    setExcludedReason("");
+    setFixedDraft({
+      course_code: "",
+      course_name: "",
+      exam_date: "",
+      department: null,
+      prerequisite_course_codes: [],
+    });
+    setCourseDraft({
+      course_code: "",
+      course_name: "",
+      semester_number: 1,
+      high_failure_rate: false,
+      department: null,
+      prerequisite_course_codes: [],
+    });
+
+    setSelectedScheduleSolutionId(null);
+    setSelectedScheduleMoedNumber(1);
+    setSelectedScheduleExamKey(null);
+    setSelectedSchedulePreviewDate(null);
+    setSchedulePreviewResponses({});
+    setActiveConflict(null);
+
+    setSetupStatus("Started a new setup draft.");
+    setActionStatus("New setup created.");
   }
 
   return (
-    <div className="app-shell">
-      <aside className="app-sidebar panel">
-        <div className="sidebar-branding">
-          <strong>Exam Optimizer</strong>
-          <span>Workspace navigation</span>
-        </div>
+    <div className="min-h-screen bg-slate-100 text-slate-900">
+      <Sidebar
+        collapsed={collapsedSidebar}
+        title="Exam Optimizer"
+        subtitle="Workspace navigation"
+        items={sidebarItems}
+        active={activeRoute}
+        activeChild={activeStep}
+        onToggle={() => setCollapsedSidebar((current) => !current)}
+        onSelect={(key) => {
+          if (!isSolveInProgress) {
+            setActiveRoute(key as AppRoute);
+          }
+        }}
+        onSelectChild={(key) => {
+          if (isSolveInProgress) {
+            return;
+          }
+          setActiveRoute("setup");
+          setActiveStep(key as SetupStep);
+        }}
+      />
 
-        <nav className="sidebar-nav" aria-label="Primary navigation">
-          <div className="sidebar-group">
-            <button
-              type="button"
-              className={activeRoute === "/setup" ? "sidebar-link active" : "sidebar-link"}
-              onClick={() => {
-                setSetupExpanded(true);
-                navigateTo("/setup");
-              }}
-            >
-              <span>Setup</span>
-              <span className="sidebar-caret">{setupExpanded ? "-" : "+"}</span>
-            </button>
-
-            {setupExpanded ? (
-              <div className="sidebar-sublinks">
-                {SETUP_STEPS.map((step) => (
-                  <button
-                    key={step.id}
-                    type="button"
-                    className={activeRoute === "/setup" && activeSetupSection === step.id ? "sidebar-sublink active" : "sidebar-sublink"}
-                    disabled={!hasInitialSetup && step.id !== "project"}
-                    onClick={() => navigateTo("/setup", step.id)}
-                  >
-                    {step.title}
-                  </button>
-                ))}
-              </div>
-            ) : null}
+      <div className={cn("relative overflow-x-hidden", collapsedSidebar ? "ml-20" : "ml-72")}>
+        <div className="mx-auto flex w-full max-w-[1600px] flex-col gap-4 p-6 pb-36">
+          <div className="flex justify-end gap-2">
+            <Button type="button" variant="outline" onClick={() => void refreshRemoteSavedSetups()}>Refresh Saved Setups</Button>
+            <Button type="button" variant="outline" onClick={() => void handleLogin()}>
+              {authUserId ? `Logged in: ${authUserId}` : "Login"}
+            </Button>
           </div>
 
-          <button
-            type="button"
-            className={activeRoute === "/schedule" ? "sidebar-link active" : "sidebar-link"}
-            onClick={() => navigateTo("/schedule")}
-          >
-            <span>Schedule</span>
-          </button>
-        </nav>
-      </aside>
-
-      <main className="content-shell workspace-grid">
-        {activeRoute === "/setup" ? (
-          <div className="setup-route-layout route-panel">
-          <section className="panel setup-panel setup-main-panel">
-            <div className="setup-shell-header compact-shell-header">
-              <SectionTitle title="Setup" subtitle="Start with one saved initial setup entry. Once it is saved, keep the summary at the top and continue with excluded dates, fixed exams, and courses." />
-            </div>
-
-            <section
-              className="setup-step-panel setup-category-panel"
-              ref={(element) => {
-                setupSectionRefs.current.project = element;
-              }}
-            >
-              <SectionTitle title={SETUP_STEPS[0].title} subtitle={SETUP_STEPS[0].subtitle} />
-              <div className="setup-step-content compact-step-content">
-                {hasInitialSetup && !isEditingInitialSetup ? (
-                  <div className="saved-entry-summary">
-                    <div className="saved-entry-summary-header">
-                      <div>
-                        <strong>{project.project_name}</strong>
-                        <p className="field-hint">Saved under {currentSavedSetup?.year ?? project.moed_windows[0]?.start_date.slice(0, 4) ?? "Draft"} and ready for the rest of setup.</p>
-                      </div>
-                      <div className="row-actions">
-                        <button type="button" className="secondary-button" onClick={() => setIsEditingInitialSetup(true)}>
-                          Edit entry
-                        </button>
-                        <button type="button" onClick={handleSaveInitialSetup}>
-                          Update saved setup
-                        </button>
+          {activeRoute === "setup" ? (
+            <fieldset disabled={isSolveInProgress} className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_320px] disabled:opacity-70">
+              <div className="space-y-4">
+                <Card className="border-slate-300/70 bg-white/80">
+                  <CardContent className="p-4">
+                    <div className="space-y-2">
+                      <p className="text-xs uppercase tracking-wide text-slate-500">Active workspace</p>
+                      <div className="flex items-center gap-2">
+                        <Sparkles className="h-4 w-4 text-indigo-600" />
+                        <p className="h-9 min-w-[240px] rounded-md border border-slate-200 bg-white px-3 py-2 text-sm font-medium text-slate-700">
+                          {project.project_name}
+                        </p>
                       </div>
                     </div>
-                    <div className="setup-summary-grid">
-                      <div>
-                        <span>Name</span>
-                        <strong>{project.project_name}</strong>
-                      </div>
-                      <div>
-                        <span>Moed windows</span>
-                        <strong>{formatMoedWindowSummary(project.moed_windows)}</strong>
-                      </div>
-                      <div>
-                        <span>Per-Moed gaps</span>
-                        <strong>
-                          {project.moed_windows.map((window) => `${getMoedLabel(window.moed_number)} ${window.same_semester_gap_days}/${window.prerequisite_gap_days}/${window.high_failure_gap_days}`).join(" | ")}
-                        </strong>
-                      </div>
-                      <div>
-                        <span>Saved</span>
-                        <strong>{project.initial_setup_saved_at ? new Date(project.initial_setup_saved_at).toLocaleString() : "Draft"}</strong>
-                      </div>
-                    </div>
-                  </div>
-                ) : (
-                  <>
-                    <label>
-                      <span>Project name</span>
-                      <input
-                        value={project.project_name}
-                        onChange={(event) => patchProject({ project_name: event.target.value })}
-                      />
-                    </label>
-                    <label className="compact-number-field moed-count-field">
-                      <span>Moed count</span>
-                      <input
-                        type="number"
-                        min="1"
-                        max="3"
-                        value={project.moed_windows.length}
-                        onChange={(event) =>
-                          patchProject({
-                            moed_windows: buildMoedWindows(Math.min(3, Math.max(1, Number(event.target.value) || 1)), project.moed_windows),
-                          })
-                        }
-                      />
-                    </label>
-                    <div className="moed-window-grid">
-                      {project.moed_windows.map((window, index) => {
-                        const previousWindow = index > 0 ? project.moed_windows[index - 1] : null;
-                        const minimumStartDate = previousWindow ? addDays(previousWindow.end_date, 1) : undefined;
+                  </CardContent>
+                </Card>
+                <Tabs value={activeStep} onValueChange={(next) => setActiveStep(next as SetupStep)}>
+                  <TabsContent value="setup" className="mt-0">
+                    <Card>
+                      <CardHeader className="flex flex-row items-start justify-between gap-3">
+                        <div>
+                          <CardTitle>Initial Setup</CardTitle>
+                          <CardDescription>Define Moed windows and spacing constraints.</CardDescription>
+                        </div>
+                        <Button
+                          type="button"
+                          onClick={handleNewSetup}
+                          className="bg-emerald-600 text-white transition-colors hover:bg-emerald-500"
+                        >
+                          New Setup
+                        </Button>
+                      </CardHeader>
+                      <CardContent className="space-y-6">
+                        <Form className="grid gap-4 md:grid-cols-2">
+                          <FormField>
+                            <FormItem>
+                              <Label>Project Name</Label>
+                              <Input
+                                value={project.project_name}
+                                onChange={(event) => patchProject({ project_name: event.target.value })}
+                                placeholder="Project name"
+                              />
+                            </FormItem>
+                          </FormField>
+                          <FormField>
+                            <FormItem>
+                              <Label>Moed Count</Label>
+                              <Input
+                                type="number"
+                                min={1}
+                                max={3}
+                                value={project.moed_windows.length}
+                                onChange={(event) => patchProject({ moed_windows: buildMoedWindows(Math.max(1, Math.min(3, Number(event.target.value) || 1)), project.moed_windows) })}
+                              />
+                            </FormItem>
+                          </FormField>
+                        </Form>
 
-                        return (
-                          <div key={`moed-window-${window.moed_number}`} className="moed-window-card">
-                            <div className="moed-window-header">
-                              <strong>{getMoedLabel(window.moed_number)}</strong>
-                            </div>
-                            <div className="moed-window-fields">
-                              <label className="moed-date-field">
-                                <span>Start date</span>
-                                <input
-                                  type="date"
-                                  min={minimumStartDate}
-                                  value={window.start_date}
-                                  onChange={(event) =>
-                                    patchProject({
-                                      moed_windows: project.moed_windows.map((currentWindow, currentIndex) =>
-                                        currentIndex === index
-                                          ? { ...currentWindow, start_date: event.target.value }
-                                          : currentWindow,
-                                      ),
-                                    })
-                                  }
-                                />
-                              </label>
-                              <label className="moed-date-field">
-                                <span>End date</span>
-                                <input
-                                  type="date"
-                                  min={window.start_date}
-                                  value={window.end_date}
-                                  onChange={(event) =>
-                                    patchProject({
-                                      moed_windows: project.moed_windows.map((currentWindow, currentIndex) =>
-                                        currentIndex === index
-                                          ? { ...currentWindow, end_date: event.target.value }
-                                          : currentWindow,
-                                      ),
-                                    })
-                                  }
-                                />
-                              </label>
-                              <label className="compact-number-field moed-gap-field">
-                                <span>Same semester gap</span>
-                                <input
-                                  type="number"
-                                  min="1"
-                                  max="30"
-                                  value={window.same_semester_gap_days}
-                                  onChange={(event) =>
-                                    patchProject({
-                                      moed_windows: project.moed_windows.map((currentWindow, currentIndex) =>
-                                        currentIndex === index
-                                          ? { ...currentWindow, same_semester_gap_days: Number(event.target.value) }
-                                          : currentWindow,
-                                      ),
-                                    })
-                                  }
-                                />
-                              </label>
-                              <label className="compact-number-field moed-gap-field">
-                                <span>Prerequisite gap</span>
-                                <input
-                                  type="number"
-                                  min="1"
-                                  max="30"
-                                  value={window.prerequisite_gap_days}
-                                  onChange={(event) =>
-                                    patchProject({
-                                      moed_windows: project.moed_windows.map((currentWindow, currentIndex) =>
-                                        currentIndex === index
-                                          ? { ...currentWindow, prerequisite_gap_days: Number(event.target.value) }
-                                          : currentWindow,
-                                      ),
-                                    })
-                                  }
-                                />
-                              </label>
-                              <label className="compact-number-field moed-gap-field">
-                                <span>High-failure gap</span>
-                                <input
-                                  type="number"
-                                  min="1"
-                                  max="30"
-                                  value={window.high_failure_gap_days}
-                                  onChange={(event) =>
-                                    patchProject({
-                                      moed_windows: project.moed_windows.map((currentWindow, currentIndex) =>
-                                        currentIndex === index
-                                          ? { ...currentWindow, high_failure_gap_days: Number(event.target.value) }
-                                          : currentWindow,
-                                      ),
-                                    })
-                                  }
-                                />
-                              </label>
-                            </div>
-                          </div>
-                        );
-                      })}
-                    </div>
-                    <div className="button-row initial-entry-actions">
-                      <button type="button" onClick={handleSaveInitialSetup}>
-                        {hasInitialSetup ? "Update initial setup" : "Save initial setup"}
-                      </button>
-                    </div>
-                  </>
-                )}
-              </div>
-            </section>
-
-            {hasInitialSetup ? (
-              <>
-            <div className="setup-shell-header locked-summary-header">
-              <div className="setup-summary-row">
-                <span>{project.excluded_ranges.length} excluded ranges</span>
-                <span>{project.fixed_exams.length} fixed exams</span>
-                <span>{project.courses.length} courses</span>
-                <span>{project.solutions.length} solutions</span>
-              </div>
-            </div>
-
-            <div className="setup-sections-grid">
-            <section
-              className="setup-step-panel setup-category-panel"
-              ref={(element) => {
-                setupSectionRefs.current.excluded = element;
-              }}
-            >
-              <SectionTitle title={SETUP_STEPS[1].title} subtitle={SETUP_STEPS[1].subtitle} />
-              <div className="setup-step-content compact-step-content">
-                <ExcludedRangeForm
-                  key={editingExcludedIndex === null ? "new-excluded-range" : `edit-excluded-range-${editingExcludedIndex}`}
-                  initialValue={editingExcludedIndex === null ? undefined : project.excluded_ranges[editingExcludedIndex]}
-                  onSubmit={saveExcludedRange}
-                  onCancel={editingExcludedIndex === null ? undefined : () => setEditingExcludedIndex(null)}
-                />
-                <EditableSimpleList
-                  items={project.excluded_ranges.map((range) => `${range.start_date} to ${range.end_date} - ${range.reason}`)}
-                  emptyMessage="No blocked dates yet."
-                  onEdit={setEditingExcludedIndex}
-                  onRemove={removeExcludedRange}
-                />
-              </div>
-            </section>
-
-            <section
-              className="setup-step-panel setup-category-panel"
-              ref={(element) => {
-                setupSectionRefs.current.fixed = element;
-              }}
-            >
-              <SectionTitle title={SETUP_STEPS[2].title} subtitle={SETUP_STEPS[2].subtitle} />
-              <div className="setup-step-content compact-step-content">
-                <FixedExamForm
-                  key={editingFixedExamIndex === null ? "new-fixed-exam" : `edit-fixed-exam-${editingFixedExamIndex}`}
-                  initialValue={editingFixedExamIndex === null ? undefined : project.fixed_exams[editingFixedExamIndex]}
-                  onSubmit={saveFixedExam}
-                  onCancel={editingFixedExamIndex === null ? undefined : () => setEditingFixedExamIndex(null)}
-                />
-                <EditableSimpleList
-                  items={project.fixed_exams.map((exam) => formatFixedExamItem(exam))}
-                  emptyMessage="No fixed exams yet."
-                  onEdit={setEditingFixedExamIndex}
-                  onRemove={removeFixedExam}
-                />
-              </div>
-            </section>
-
-            <section
-              className="setup-step-panel setup-category-panel"
-              ref={(element) => {
-                setupSectionRefs.current.courses = element;
-              }}
-            >
-              <SectionTitle title={SETUP_STEPS[3].title} subtitle={SETUP_STEPS[3].subtitle} />
-              <div className="setup-step-content compact-step-content">
-                <div className="stack-form import-panel compact-import-panel">
-                  <div className="file-input-row">
-                    <div>
-                      <span className="file-input-label">Excel course template</span>
-                      <p className="field-hint">Expected columns: Course ID, Course Name, Semester, Is High Failure, Prerequisites, Department. Import replaces the current course list.</p>
-                    </div>
-                    <div className="file-input-controls">
-                      <button type="button" className="secondary-button" onClick={() => void handleCourseTemplateDownload()}>
-                        Download template
-                      </button>
-                      <input
-                        ref={courseImportInputRef}
-                        className="file-input-hidden"
-                        type="file"
-                        accept=".xlsx"
-                        disabled={busyAction !== null}
-                        onChange={(event) => {
-                          const file = event.target.files?.[0];
-                          event.currentTarget.value = "";
-                          if (file) {
-                            void handleCourseImport(file);
-                          }
-                        }}
-                      />
-                      <button
-                        type="button"
-                        className="secondary-button"
-                        disabled={busyAction !== null}
-                        onClick={() => courseImportInputRef.current?.click()}
-                      >
-                        {busyAction === "import-courses" ? "Importing..." : "Choose file"}
-                      </button>
-                      <span className="file-input-name">{selectedCourseFileName || "No file selected"}</span>
-                    </div>
-                  </div>
-                  {courseImportIssues.length > 0 ? <IssueList issues={courseImportIssues} compact /> : null}
-                </div>
-                <CourseForm
-                  key={editingCourseIndex === null ? "new-course" : `edit-course-${editingCourseIndex}`}
-                  initialValue={editingCourseIndex === null ? undefined : project.courses[editingCourseIndex]}
-                  onSubmit={saveCourse}
-                  onCancel={editingCourseIndex === null ? undefined : () => setEditingCourseIndex(null)}
-                />
-                <div className="list-section-header compact-list-header">
-                  <div>
-                    <strong>Current course list</strong>
-                    <p className="field-hint">{project.courses.length} courses in the current draft.</p>
-                  </div>
-                  <div className="row-actions">
-                    <button
-                      type="button"
-                      className="secondary-button"
-                      disabled={busyAction !== null || project.courses.length === 0}
-                      onClick={resetCourseList}
-                    >
-                      Reset list
-                    </button>
-                    <button
-                      type="button"
-                      className="secondary-button"
-                      onClick={() => setCoursesListCollapsed((current) => !current)}
-                    >
-                      {coursesListCollapsed ? "Expand list" : "Collapse list"}
-                    </button>
-                  </div>
-                </div>
-                {!coursesListCollapsed ? (
-                  <div className="table-wrap compact-table-wrap">
-                    <table>
-                      <thead>
-                        <tr>
-                          <th>Code</th>
-                          <th>Name</th>
-                          <th>Semester</th>
-                          <th>Department</th>
-                          <th>High failure</th>
-                          <th>Prerequisite</th>
-                          <th>Actions</th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {project.courses.length === 0 ? (
-                          <tr>
-                            <td colSpan={7} className="empty-row">
-                              No courses added yet.
-                            </td>
-                          </tr>
-                        ) : (
-                          project.courses.map((course, index) => (
-                            <tr key={`${course.course_code}-${index}`}>
-                              <td>{course.course_code}</td>
-                              <td>{course.course_name}</td>
-                              <td>{course.semester_number}</td>
-                              <td>{course.department ?? "All"}</td>
-                              <td>{course.high_failure_rate ? "Yes" : "No"}</td>
-                              <td>{course.prerequisite_course_codes.length > 0 ? course.prerequisite_course_codes.join(", ") : "-"}</td>
-                              <td>
-                                <div className="row-actions">
-                                  <button type="button" className="secondary-button" onClick={() => setEditingCourseIndex(index)}>
-                                    Edit
-                                  </button>
-                                  <button type="button" className="danger-button" onClick={() => removeCourse(index)}>
-                                    Delete
-                                  </button>
+                        <div className="grid gap-4 xl:grid-cols-3">
+                          {project.moed_windows.map((window, index) => (
+                            <Card key={`moed-${window.moed_number}`} className="border-slate-200">
+                              <CardHeader className="pb-3">
+                                <CardTitle className="text-sm">{getMoedLabel(window.moed_number)}</CardTitle>
+                              </CardHeader>
+                              <CardContent className="space-y-3">
+                                <FormItem>
+                                  <Label>Start Date</Label>
+                                  <Input
+                                    type="date"
+                                    value={window.start_date}
+                                    onChange={(event) =>
+                                      patchProject({
+                                        moed_windows: project.moed_windows.map((candidate, candidateIndex) =>
+                                          candidateIndex === index ? { ...candidate, start_date: event.target.value } : candidate,
+                                        ),
+                                      })
+                                    }
+                                  />
+                                </FormItem>
+                                <FormItem>
+                                  <Label>End Date</Label>
+                                  <Input
+                                    type="date"
+                                    value={window.end_date}
+                                    onChange={(event) =>
+                                      patchProject({
+                                        moed_windows: project.moed_windows.map((candidate, candidateIndex) =>
+                                          candidateIndex === index ? { ...candidate, end_date: event.target.value } : candidate,
+                                        ),
+                                      })
+                                    }
+                                  />
+                                </FormItem>
+                                <div className="space-y-2">
+                                  <p className="text-xs font-medium uppercase tracking-wide text-slate-500">Gaps (days)</p>
+                                  <div className="grid grid-cols-3 gap-2">
+                                  <FormItem>
+                                    <Label className="text-xs">Same Sem</Label>
+                                    <Input
+                                      type="number"
+                                      min={0}
+                                      value={window.same_semester_gap_days}
+                                      onChange={(event) =>
+                                        patchProject({
+                                          moed_windows: project.moed_windows.map((candidate, candidateIndex) =>
+                                            candidateIndex === index
+                                              ? {
+                                                  ...candidate,
+                                                  same_semester_gap_days: parseBoundedInteger(event.target.value, 0, 30, candidate.same_semester_gap_days),
+                                                }
+                                              : candidate,
+                                          ),
+                                        })
+                                      }
+                                    />
+                                  </FormItem>
+                                  <FormItem>
+                                    <Label className="text-xs">Prereq</Label>
+                                    <Input
+                                      type="number"
+                                      min={0}
+                                      value={window.prerequisite_gap_days}
+                                      onChange={(event) =>
+                                        patchProject({
+                                          moed_windows: project.moed_windows.map((candidate, candidateIndex) =>
+                                            candidateIndex === index
+                                              ? {
+                                                  ...candidate,
+                                                  prerequisite_gap_days: parseBoundedInteger(event.target.value, 0, 30, candidate.prerequisite_gap_days),
+                                                }
+                                              : candidate,
+                                          ),
+                                        })
+                                      }
+                                    />
+                                  </FormItem>
+                                  <FormItem>
+                                    <Label className="text-xs">High Fail</Label>
+                                    <Input
+                                      type="number"
+                                      min={0}
+                                      value={window.high_failure_gap_days}
+                                      onChange={(event) =>
+                                        patchProject({
+                                          moed_windows: project.moed_windows.map((candidate, candidateIndex) =>
+                                            candidateIndex === index
+                                              ? {
+                                                  ...candidate,
+                                                  high_failure_gap_days: parseBoundedInteger(event.target.value, 0, 30, candidate.high_failure_gap_days),
+                                                }
+                                              : candidate,
+                                          ),
+                                        })
+                                      }
+                                    />
+                                  </FormItem>
                                 </div>
-                              </td>
-                            </tr>
-                          ))
-                        )}
-                      </tbody>
-                    </table>
-                  </div>
-                ) : null}
-              </div>
-            </section>
-          </div>
+                                </div>
+                              </CardContent>
+                            </Card>
+                          ))}
+                        </div>
+                      </CardContent>
+                    </Card>
+                  </TabsContent>
 
-          <div className="setup-flow-footer">
-            <div className="button-row setup-actions">
-              <button onClick={handleValidate} disabled={busyAction !== null}>
-                {busyAction === "validate" ? "Validating..." : "Validate draft"}
-              </button>
-              <button className="accent-button" onClick={handleSolve} disabled={busyAction !== null}>
-                {busyAction === "solve" ? "Solving..." : "Generate options"}
-              </button>
-            </div>
-          </div>
-              </>
-            ) : (
-              <div className="setup-locked-state">
-                <p className="empty-state">Save the initial setup entry first. After that, excluded dates, fixed exams, and courses will unlock here.</p>
-              </div>
-            )}
-          </section>
-          <aside className="setup-side-rail">
-            <section className="panel setup-side-panel">
-              <SectionTitle title="Current Entry" subtitle="The initial setup is stored separately so it can become a reusable yearly template later." />
-              <div className="status-card compact-status-card neutral-status-card">
-                <span className="status-label">Workspace status</span>
-                <strong>{status}</strong>
-              </div>
-              <div className="setup-summary-grid side-summary-grid">
-                <div>
-                  <span>Year folder</span>
-                  <strong>{project.moed_windows[0]?.start_date.slice(0, 4) ?? "-"}</strong>
-                </div>
-                <div>
-                  <span>Saved setups</span>
-                  <strong>{allSavedSetups.length}</strong>
-                </div>
-                <div>
-                  <span>Courses</span>
-                  <strong>{project.courses.length}</strong>
-                </div>
-                <div>
-                  <span>Solutions</span>
-                  <strong>{project.solutions.length}</strong>
-                </div>
-              </div>
-            </section>
+                  <TabsContent value="excluded" className="mt-0">
+                    <Card>
+                      <CardHeader>
+                        <CardTitle>Excluded Dates</CardTitle>
+                        <CardDescription>Block unavailable periods using an integrated date range picker.</CardDescription>
+                      </CardHeader>
+                      <CardContent className="space-y-5">
+                        <Form className="grid gap-4 lg:grid-cols-[2fr_2fr_auto]">
+                          <FormField>
+                            <FormItem>
+                              <Label>Date Range</Label>
+                              <Popover>
+                                <PopoverTrigger asChild>
+                                  <Button type="button" variant="outline" className="w-full justify-start text-left font-normal">
+                                    <CalendarIcon className="mr-2 h-4 w-4" />
+                                    {formatRangeLabel(excludedDraftRange)}
+                                  </Button>
+                                </PopoverTrigger>
+                                <PopoverContent className="w-auto p-0">
+                                  <Calendar mode="range" selected={excludedDraftRange} onSelect={setExcludedDraftRange} numberOfMonths={2} />
+                                </PopoverContent>
+                              </Popover>
+                            </FormItem>
+                          </FormField>
+                          <FormField>
+                            <FormItem>
+                              <Label>Reason</Label>
+                              <Input value={excludedReason} onChange={(event) => setExcludedReason(event.target.value)} placeholder="Holiday, ceremony, maintenance..." />
+                            </FormItem>
+                          </FormField>
+                          <div className="flex items-end">
+                            <Button type="button" onClick={addExcludedRange}>Add Range</Button>
+                          </div>
+                        </Form>
 
-            <section className="panel setup-side-panel">
-              <SectionTitle title="Saved Setups" subtitle="Grouped by year now so future file-based folders can mirror the same structure." />
-              {sortedSetupYears.length === 0 ? (
-                <p className="empty-state">No saved initial setups yet.</p>
-              ) : (
-                <div className="saved-setup-library">
-                  {sortedSetupYears.map((yearKey) => (
-                    <section key={yearKey} className="year-folder-group">
-                      <button
-                        type="button"
-                        className="year-folder-toggle"
-                        onClick={() =>
-                          setCollapsedSetupYears((current) => ({
-                            ...current,
-                            [yearKey]: !(current[yearKey] ?? false),
-                          }))
-                        }
-                      >
-                        <span>{yearKey}</span>
-                        <span>
-                          {setupLibrary[yearKey].length} setup{setupLibrary[yearKey].length === 1 ? "" : "s"} {collapsedSetupYears[yearKey] ? "+" : "-"}
-                        </span>
-                      </button>
-                      {!collapsedSetupYears[yearKey] ? (
-                        <div className="year-folder-list">
-                          {setupLibrary[yearKey].map((entry) => (
-                            <div key={entry.entry_id} className="saved-setup-item">
-                              <button
+                        <div className="grid gap-3">
+                          {project.excluded_ranges.length === 0 ? <FormMessage>No excluded ranges added yet.</FormMessage> : null}
+                          {project.excluded_ranges.map((range, index) => (
+                            <div key={`${range.start_date}-${index}`} className="flex items-center justify-between rounded-lg border border-slate-200 bg-slate-50 px-3 py-2">
+                              <div>
+                                <p className="text-sm font-medium">{formatDisplayDate(range.start_date)} to {formatDisplayDate(range.end_date)}</p>
+                                <p className="text-xs text-slate-500">{range.reason}</p>
+                              </div>
+                              <Button
                                 type="button"
-                                className={entry.entry_id === project.setup_entry_id ? "saved-setup-button active" : "saved-setup-button"}
-                                onClick={() => handleUseSavedSetup(entry)}
+                                size="sm"
+                                variant="ghost"
+                                onClick={() => patchProject({ excluded_ranges: project.excluded_ranges.filter((_, candidateIndex) => candidateIndex !== index) })}
                               >
-                                <strong>{entry.project_name}</strong>
-                                <span>{formatMoedWindowSummary(entry.moed_windows)}</span>
-                              </button>
-                              <button
-                                type="button"
-                                className="saved-setup-delete"
-                                aria-label={`Delete ${entry.project_name}`}
-                                onClick={() => handleDeleteSavedSetup(entry)}
-                              >
-                                <svg viewBox="0 0 16 16" aria-hidden="true" focusable="false">
-                                  <path d="M3.5 4.5h9" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" />
-                                  <path d="M6 4.5v-1A1.5 1.5 0 0 1 7.5 2h1A1.5 1.5 0 0 1 10 3.5v1" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" />
-                                  <path d="M5 6.5v5.5A1.5 1.5 0 0 0 6.5 13.5h3A1.5 1.5 0 0 0 11 12V6.5" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" />
-                                  <path d="M7 7.5v4" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" />
-                                  <path d="M9 7.5v4" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" />
-                                </svg>
-                              </button>
+                                <Trash className="h-4 w-4 text-red-600" />
+                              </Button>
                             </div>
                           ))}
                         </div>
-                      ) : null}
-                    </section>
-                  ))}
-                </div>
-              )}
-            </section>
-          </aside>
-          </div>
-        ) : null}
+                      </CardContent>
+                    </Card>
+                  </TabsContent>
 
-        {activeRoute === "/schedule" ? (
-          <>
-        <section className="panel panel-wide route-panel">
-          <div className="workspace-tabs">
-            <button
-              type="button"
-              className={activeWorkspaceTab === "calendar" ? "solution-tab active" : "solution-tab"}
-              onClick={() => setActiveWorkspaceTab("calendar")}
-            >
-              Calendar
-            </button>
-            <button
-              type="button"
-              className={activeWorkspaceTab === "compare" ? "solution-tab active" : "solution-tab"}
-              onClick={() => setActiveWorkspaceTab("compare")}
-            >
-              Compare
-            </button>
-            <button
-              type="button"
-              className={activeWorkspaceTab === "graph" ? "solution-tab active" : "solution-tab"}
-              onClick={() => setActiveWorkspaceTab("graph")}
-            >
-              Graph
-            </button>
-          </div>
+                  <TabsContent value="fixed" className="mt-0">
+                    <Card>
+                      <CardHeader>
+                        <CardTitle>Fixed Exams</CardTitle>
+                        <CardDescription>Lock required exams with modern date and combobox inputs.</CardDescription>
+                      </CardHeader>
+                      <CardContent className="space-y-5">
+                        <Form className="grid gap-4 lg:grid-cols-3">
+                          <FormField>
+                            <FormItem>
+                              <Label>Course Code</Label>
+                              <Input value={fixedDraft.course_code} onChange={(event) => setFixedDraft((current) => ({ ...current, course_code: event.target.value }))} />
+                            </FormItem>
+                          </FormField>
+                          <FormField>
+                            <FormItem>
+                              <Label>Course Name</Label>
+                              <Input value={fixedDraft.course_name} onChange={(event) => setFixedDraft((current) => ({ ...current, course_name: event.target.value }))} />
+                            </FormItem>
+                          </FormField>
+                          <FormField>
+                            <FormItem>
+                              <Label>Exam Date</Label>
+                              <Popover>
+                                <PopoverTrigger asChild>
+                                  <Button type="button" variant="outline" className="w-full justify-start text-left font-normal">
+                                    <CalendarIcon className="mr-2 h-4 w-4" />
+                                    {fixedDraft.exam_date ? formatDisplayDate(fixedDraft.exam_date) : "Pick date"}
+                                  </Button>
+                                </PopoverTrigger>
+                                <PopoverContent className="w-auto p-0">
+                                  <Calendar
+                                    mode="single"
+                                    selected={fixedDraft.exam_date ? new Date(`${fixedDraft.exam_date}T00:00:00`) : undefined}
+                                    onSelect={(date) =>
+                                      setFixedDraft((current) => ({
+                                        ...current,
+                                        exam_date: date ? format(date, "yyyy-MM-dd") : "",
+                                      }))
+                                    }
+                                  />
+                                </PopoverContent>
+                              </Popover>
+                            </FormItem>
+                          </FormField>
+                          <FormField className="lg:col-span-2">
+                            <FormItem>
+                              <Label>Prerequisite Course Codes</Label>
+                              <MultiSelectCombobox
+                                options={allCourseCodes}
+                                values={fixedDraft.prerequisite_course_codes}
+                                placeholder="Select prerequisites"
+                                onChange={(nextValues) => setFixedDraft((current) => ({ ...current, prerequisite_course_codes: nextValues }))}
+                              />
+                            </FormItem>
+                          </FormField>
+                          <FormField>
+                            <FormItem>
+                              <Label>Department</Label>
+                              <SingleSelectCombobox
+                                value={fixedDraft.department}
+                                placeholder="All departments"
+                                options={[
+                                  { label: "All departments", value: null },
+                                  { label: "SW", value: "SW" },
+                                  { label: "IS", value: "IS" },
+                                ]}
+                                onChange={(next) => setFixedDraft((current) => ({ ...current, department: next }))}
+                              />
+                            </FormItem>
+                          </FormField>
+                        </Form>
 
-          <div className="workspace-tab-panel">
-            {activeWorkspaceTab === "calendar" ? (
-              <>
-                <SectionTitle title="Master Calendar" subtitle="Primary solution view with semester rows, Moed days, and move-preview overlays." />
-                {project.solutions.length === 0 || !activeSolution ? (
-                  <p className="empty-state">Generate schedules to unlock the master calendar.</p>
-                ) : (
-                  <>
-                    <div className="calendar-toolbar">
-                      <div className="solution-tabs">
-                        {project.solutions.map((solution) => (
-                          <button
-                            key={solution.solution_id}
-                            type="button"
-                            className={solution.solution_id === activeSolution.solution_id ? "solution-tab active" : "solution-tab"}
-                            onClick={() => {
-                              setSelectedSolutionId(solution.solution_id);
-                              setSelectedExamKey(null);
-                              setGraphFocusCourseCode(null);
-                            }}
-                          >
-                            {solution.solution_id}
-                          </button>
-                        ))}
+                        <div className="flex flex-wrap gap-2">
+                          <Button type="button" onClick={addFixedExam}>Add Fixed Exam</Button>
+                          <Button type="button" variant="secondary" onClick={() => void handleImportFixedExamsFromSavedSetup()}>
+                            Import Fixed Exams From Saved Setup
+                          </Button>
+                        </div>
+
+                        <div className="grid gap-3">
+                          {project.fixed_exams.length === 0 ? <FormMessage>No fixed exams yet.</FormMessage> : null}
+                          {project.fixed_exams.map((exam, index) => (
+                            <div key={`${exam.course_code}-${index}`} className="flex items-center justify-between rounded-lg border border-slate-200 px-3 py-2">
+                              <div>
+                                <p className="text-sm font-medium">{exam.course_code} - {exam.course_name}</p>
+                                <p className="text-xs text-slate-500">{formatDisplayDate(exam.exam_date)} | Department: {exam.department ?? "ALL"} | Prerequisites: {exam.prerequisite_course_codes.join(", ") || "-"}</p>
+                              </div>
+                              <Button
+                                type="button"
+                                size="sm"
+                                variant="ghost"
+                                onClick={() => patchProject({ fixed_exams: project.fixed_exams.filter((_, candidateIndex) => candidateIndex !== index) })}
+                              >
+                                <Trash className="h-4 w-4 text-red-600" />
+                              </Button>
+                            </div>
+                          ))}
+                        </div>
+                      </CardContent>
+                    </Card>
+                  </TabsContent>
+
+                  <TabsContent value="courses" className="mt-0">
+                    <Card>
+                      <CardHeader>
+                        <CardTitle>Courses</CardTitle>
+                        <CardDescription>High-density course data with search, sorting, pagination, and streamlined row actions.</CardDescription>
+                      </CardHeader>
+                      <CardContent className="space-y-5">
+                        <div className="flex flex-wrap items-center gap-2">
+                          <Button type="button" variant="secondary" onClick={() => void handleTemplateDownload()}>
+                            Download Template
+                          </Button>
+                          <Button type="button" variant="secondary" onClick={() => void handleImportCoursesFromSavedSetup()}>
+                            Import Courses From Saved Setup
+                          </Button>
+                          <label className="inline-flex cursor-pointer items-center gap-2 rounded-md border border-slate-300 bg-white px-3 py-2 text-sm text-slate-700 hover:bg-slate-50">
+                            <span>{busyAction === "import-courses" ? "Importing..." : "Import Courses"}</span>
+                            <input
+                              type="file"
+                              accept=".xlsx"
+                              className="hidden"
+                              onChange={(event) => {
+                                const file = event.target.files?.[0];
+                                event.currentTarget.value = "";
+                                if (file) {
+                                  void handleCourseImport(file);
+                                }
+                              }}
+                            />
+                          </label>
+                        </div>
+                        <p className="text-xs text-slate-500">
+                          Note: keep or delete the EXAMPLE row in each sheet. Rows that start with EXAMPLE are ignored during import.
+                        </p>
+
+                        <Form className="grid gap-4 xl:grid-cols-6">
+                          <FormField className="xl:col-span-1">
+                            <FormItem>
+                              <Label>Course Code</Label>
+                              <Input value={courseDraft.course_code} onChange={(event) => setCourseDraft((current) => ({ ...current, course_code: event.target.value }))} />
+                            </FormItem>
+                          </FormField>
+                          <FormField className="xl:col-span-2">
+                            <FormItem>
+                              <Label>Course Name</Label>
+                              <Input value={courseDraft.course_name} onChange={(event) => setCourseDraft((current) => ({ ...current, course_name: event.target.value }))} />
+                            </FormItem>
+                          </FormField>
+                          <FormField>
+                            <FormItem>
+                              <Label>Semester</Label>
+                              <Input
+                                type="number"
+                                min={1}
+                                max={8}
+                                value={courseDraft.semester_number}
+                                onChange={(event) => setCourseDraft((current) => ({ ...current, semester_number: Number(event.target.value) || 1 }))}
+                              />
+                            </FormItem>
+                          </FormField>
+                          <FormField>
+                            <FormItem>
+                              <Label>Department</Label>
+                              <SingleSelectCombobox
+                                value={courseDraft.department}
+                                placeholder="All departments"
+                                options={[
+                                  { label: "All departments", value: null },
+                                  { label: "SW", value: "SW" },
+                                  { label: "IS", value: "IS" },
+                                ]}
+                                onChange={(next) => setCourseDraft((current) => ({ ...current, department: next }))}
+                              />
+                            </FormItem>
+                          </FormField>
+                          <FormField>
+                            <FormItem>
+                              <Label>High Failure</Label>
+                              <Button
+                                type="button"
+                                variant={courseDraft.high_failure_rate ? "destructive" : "secondary"}
+                                onClick={() => setCourseDraft((current) => ({ ...current, high_failure_rate: !current.high_failure_rate }))}
+                                className="w-full"
+                              >
+                                {courseDraft.high_failure_rate ? "Yes" : "No"}
+                              </Button>
+                            </FormItem>
+                          </FormField>
+                          <FormField className="xl:col-span-5">
+                            <FormItem>
+                              <Label>Prerequisite Course Codes</Label>
+                              <MultiSelectCombobox
+                                options={allCourseCodes}
+                                values={courseDraft.prerequisite_course_codes}
+                                placeholder="Select prerequisites"
+                                onChange={(nextValues) => setCourseDraft((current) => ({ ...current, prerequisite_course_codes: nextValues }))}
+                              />
+                            </FormItem>
+                          </FormField>
+                          <div className="space-y-2 xl:col-span-1">
+                            <Label className="invisible">Actions</Label>
+                            <div className="flex items-end gap-2">
+                              <Button type="button" onClick={saveCourseDraft}>{editingCourseIndex === null ? "Add Course" : "Update Course"}</Button>
+                            {editingCourseIndex !== null ? (
+                              <Button
+                                type="button"
+                                variant="secondary"
+                                onClick={() => {
+                                  setEditingCourseIndex(null);
+                                  setCourseDraft({
+                                    course_code: "",
+                                    course_name: "",
+                                    semester_number: 1,
+                                    high_failure_rate: false,
+                                    department: null,
+                                    prerequisite_course_codes: [],
+                                  });
+                                }}
+                              >
+                                Cancel
+                              </Button>
+                            ) : null}
+                            </div>
+                          </div>
+                        </Form>
+
+                        <DataTable
+                          columns={courseColumns}
+                          data={project.courses}
+                          searchPlaceholder="Search code, name, prerequisite..."
+                          actionBarSelector="#action-controls"
+                        />
+                      </CardContent>
+                    </Card>
+                  </TabsContent>
+                </Tabs>
+              </div>
+
+              <div className="space-y-4">
+                <Card className="border-slate-300/70 bg-white/80">
+                  <CardContent className="p-4">
+                    <div className="min-w-[230px] space-y-2">
+                      <div className="flex items-center justify-between text-sm text-slate-600">
+                        <span>Completion</span>
+                        <span>{completion.percentage}%</span>
                       </div>
-                      <div className="calendar-actions">
-                        <div className="department-filter-group" role="group" aria-label="Calendar Moed picker">
-                          {project.moed_windows.map((window) => (
+                      <div className="h-2 rounded-full bg-slate-200">
+                        <div className="h-2 rounded-full bg-emerald-500" style={{ width: `${completion.percentage}%` }} />
+                      </div>
+                      <p className="text-xs text-slate-500">{completion.done} of {completion.total} setup stages completed</p>
+                    </div>
+                  </CardContent>
+                </Card>
+                <Card className="border-slate-300 bg-violet-50/60">
+                  <CardHeader className="pb-2">
+                    <CardTitle>Current Entry</CardTitle>
+                  </CardHeader>
+                  <CardContent className="space-y-3">
+                    <div className="rounded-lg border border-slate-200 bg-white/60 p-3">
+                      <p className="text-xs uppercase text-slate-500">Workspace status</p>
+                      <p className="font-semibold text-indigo-900">{setupStatus}</p>
+                    </div>
+                    <div className="grid grid-cols-2 gap-2 text-sm">
+                      <div className="rounded border border-slate-200 bg-white p-2">
+                        <p className="text-xs text-slate-500">Year folder</p>
+                        <p className="font-medium">{project.moed_windows[0]?.start_date.slice(0, 4) || "-"}</p>
+                      </div>
+                      <div className="rounded border border-slate-200 bg-white p-2">
+                        <p className="text-xs text-slate-500">Saved setups</p>
+                        <p className="font-medium">{remoteSavedSetups.length}</p>
+                      </div>
+                      <div className="rounded border border-slate-200 bg-white p-2">
+                        <p className="text-xs text-slate-500">Courses</p>
+                        <p className="font-medium">{project.courses.length}</p>
+                      </div>
+                      <div className="rounded border border-slate-200 bg-white p-2">
+                        <p className="text-xs text-slate-500">Solutions</p>
+                        <p className="font-medium">{project.solutions.length}</p>
+                      </div>
+                    </div>
+                    <div className="grid gap-2">
+                      <Button type="button" className="w-full" onClick={() => void handleSaveSetupToDatabase()}>
+                        Save Setup In Database Year Folder
+                      </Button>
+                    </div>
+                  </CardContent>
+                </Card>
+
+                <Card>
+                  <CardHeader className="pb-2">
+                    <CardTitle>Saved Setups (Database)</CardTitle>
+                  </CardHeader>
+                  <CardContent className="space-y-2">
+                    {sortedRemoteYears.length === 0 ? <FormMessage>No database saved setups yet.</FormMessage> : null}
+                    {sortedRemoteYears.map((yearKey) => (
+                      <div key={yearKey} className="rounded-lg border border-slate-200">
+                        <button
+                          type="button"
+                          className="flex w-full items-center justify-between px-3 py-2 text-left text-sm"
+                          onClick={() => setCollapsedYears((current) => ({ ...current, [yearKey]: !(current[yearKey] ?? false) }))}
+                        >
+                          <span>{yearKey}</span>
+                          <span>{remoteSetupsByYear[yearKey].length} setup{remoteSetupsByYear[yearKey].length === 1 ? "" : "s"} {collapsedYears[yearKey] ? "+" : "-"}</span>
+                        </button>
+                        {!collapsedYears[yearKey]
+                          ? remoteSetupsByYear[yearKey].map((setup) => (
+                              <div key={setup.setup_id} className="flex items-center justify-between border-t border-slate-200 px-3 py-2 text-sm">
+                                <button type="button" className="text-left" onClick={() => void handleLoadSetupFromDatabase(setup.setup_id)}>
+                                  <p className="font-medium">{setup.project_name}</p>
+                                </button>
+                                <Button type="button" size="icon" variant="ghost" onClick={() => void handleDeleteSetupFromDatabase(setup.setup_id)}>
+                                  <Trash className="h-4 w-4 text-red-600" />
+                                </Button>
+                              </div>
+                            ))
+                          : null}
+                      </div>
+                    ))}
+                  </CardContent>
+                </Card>
+              </div>
+            </fieldset>
+          ) : null}
+
+          {activeRoute === "schedule" ? (
+            <Card>
+              <CardHeader>
+                <CardTitle>Schedule Options</CardTitle>
+                <CardDescription>Review generated schedules and return to Setup anytime from the sidebar.</CardDescription>
+              </CardHeader>
+              <CardContent className="space-y-4">
+                {project.solutions.length === 0 ? <FormMessage>No generated options yet. Click Generate Options to create schedules.</FormMessage> : null}
+                {selectedScheduleSolution ? (
+                  <div className="space-y-3 rounded-lg border border-slate-200 bg-white p-4">
+                    <div className="flex flex-wrap items-center justify-between gap-3">
+                      <div>
+                        <p className="text-sm font-medium">Master Calendar</p>
+                        <p className="text-xs text-slate-500">Restored calendar view for {selectedScheduleSolution.solution_id}</p>
+                      </div>
+                      <div className="flex flex-wrap items-center gap-2">
+                        <div className="solution-segmented-control" aria-label="Solution options">
+                          {project.solutions.map((solution, index) => (
                             <button
-                              key={`calendar-moed-${window.moed_number}`}
+                              key={`solution-segment-${solution.solution_id}`}
                               type="button"
-                              className={selectedCalendarMoedNumber === window.moed_number ? "solution-tab active" : "solution-tab"}
-                              onClick={() => setSelectedCalendarMoedNumber(window.moed_number)}
+                              className={cn(
+                                "solution-segment",
+                                selectedScheduleSolution.solution_id === solution.solution_id ? "active" : "",
+                              )}
+                              onClick={() => setSelectedScheduleSolutionId(solution.solution_id)}
                             >
-                              {getMoedLabel(window.moed_number)}
+                              {`Sol ${index + 1}`}
                             </button>
                           ))}
                         </div>
-                        <div className="department-filter-group" role="group" aria-label="Calendar department filter">
-                          <button
+                        {project.moed_windows.map((window) => (
+                          <Button
+                            key={`schedule-moed-${window.moed_number}`}
                             type="button"
-                            className={calendarDepartmentFilter === "all" ? "solution-tab active" : "solution-tab"}
-                            onClick={() => setCalendarDepartmentFilter("all")}
+                            size="sm"
+                            variant={selectedScheduleMoedNumber === window.moed_number ? "default" : "outline"}
+                            onClick={() => setSelectedScheduleMoedNumber(window.moed_number)}
                           >
-                            All
-                          </button>
-                          <button
-                            type="button"
-                            className={[calendarDepartmentFilter === "sw" ? "solution-tab active" : "solution-tab", "department-sw"].join(" ")}
-                            onClick={() => setCalendarDepartmentFilter("sw")}
-                          >
-                            SW
-                          </button>
-                          <button
-                            type="button"
-                            className={[calendarDepartmentFilter === "is" ? "solution-tab active" : "solution-tab", "department-is"].join(" ")}
-                            onClick={() => setCalendarDepartmentFilter("is")}
-                          >
-                            IS
-                          </button>
-                        </div>
-                        <button type="button" className="secondary-button" onClick={() => setShowChanges((current) => !current)}>
-                          {showChanges ? "Hide changes" : "Show changes"}
-                        </button>
-                        <button
-                          type="button"
-                          className="secondary-button"
-                          disabled={!activeSolution.original_exams || !activeSolution.exams.some((exam) => hasExamChanged(activeSolution, exam.course_code, exam.moed_number))}
-                          onClick={() => handleResetSolution(activeSolution.solution_id)}
-                        >
-                          Reset to optimal
-                        </button>
+                            {getMoedLabel(window.moed_number)}
+                          </Button>
+                        ))}
                       </div>
                     </div>
+                    <MasterCalendar
+                      project={project}
+                      solution={selectedScheduleSolution}
+                      calendarDays={scheduleCalendarDays}
+                      selectedMoedNumber={selectedScheduleMoedNumber}
+                      semesterRows={scheduleSemesterRows}
+                      courseNameByCode={courseNameByCode}
+                      courseByCode={courseByCode}
+                      selectedExam={selectedScheduleExam}
+                      selectedPreviewDate={selectedSchedulePreviewDate}
+                      previewResponses={schedulePreviewResponses}
+                      previewLoading={previewLoading}
+                      showChanges={false}
+                      departmentFilter={scheduleDepartmentFilter}
+                      activeConflict={activeConflict}
+                      onSelectExam={(exam) => {
+                        setSelectedScheduleExamKey(getExamMoveKey(selectedScheduleSolution.solution_id, exam.course_code, exam.moed_number));
+                        setSelectedSchedulePreviewDate(exam.exam_date);
+                      }}
+                      onSelectPreviewDate={setSelectedSchedulePreviewDate}
+                      onDepartmentFilterChange={setScheduleDepartmentFilter}
+                      interactionsEnabled={busyAction !== "solve" && busyAction !== "manual-move"}
+                      onExamDoubleClick={(exam) => openCourseEditorFromExam(exam)}
+                      onExamLock={(exam) => lockExamFromCalendar(exam)}
+                      onExamUnlock={(exam) => unlockExamFromCalendar(exam)}
+                      onExamEditDate={(exam) => editExamDateFromCalendar(exam)}
+                      isExamLocked={(exam) => isExamLocked(exam)}
+                      onDropExam={(exam, targetDate) => {
+                        if (targetDate === exam.exam_date) {
+                          return;
+                        }
+                        void handleManualMove(exam, targetDate);
+                      }}
+                    />
+                  </div>
+                ) : null}
+              </CardContent>
+            </Card>
+          ) : null}
 
-                    <div className="calendar-layout">
-                      <MasterCalendar
-                        project={project}
-                        solution={activeSolution}
-                        calendarDays={calendarDays}
-                        selectedMoedNumber={selectedCalendarMoedNumber}
-                        semesterRows={semesterRows}
-                        courseNameByCode={courseNameByCode}
-                        courseByCode={courseByCode}
-                        selectedExam={selectedExam}
-                        selectedPreviewDate={selectedPreviewDate}
-                        previewResponses={previewResponses}
-                        previewLoading={previewLoading}
-                        showChanges={showChanges}
-                        departmentFilter={calendarDepartmentFilter}
-                        activeConflict={activeConflict}
-                        onSelectExam={(exam) => {
-                          setSelectedConflictKey(null);
-                          setSelectedExamKey(getExamMoveKey(activeSolution.solution_id, exam.course_code, exam.moed_number));
-                          setSelectedPreviewDate(exam.exam_date);
-                          setSelectedCalendarMoedNumber(exam.moed_number);
-                          setGraphFocusCourseCode(exam.course_code);
-                        }}
-                        onSelectPreviewDate={(date) => {
-                          setSelectedConflictKey(null);
-                          setSelectedPreviewDate(date);
-                        }}
-                      />
-                      <ConflictDrawer
-                        solution={activeSolution}
-                        selectedExam={selectedExam}
-                        selectedCourse={selectedCourse}
-                        selectedPreviewDate={selectedPreviewDate}
-                        previewResponse={previewResponse}
-                        previewStatus={previewStatus}
-                        activeConflict={activeConflict}
-                        onSelectConflict={handleFocusConflict}
-                        onApplyMove={() => {
-                          if (selectedExam && selectedPreviewDate) {
-                            void handleManualMove(activeSolution, selectedExam, selectedPreviewDate);
-                          }
-                        }}
-                        onClearSelection={() => {
-                          setSelectedConflictKey(null);
-                          setSelectedExamKey(null);
-                          setSelectedPreviewDate(null);
-                        }}
-                        busy={busyAction === "manual-move"}
-                      />
-                    </div>
-                  </>
-                )}
-              </>
-            ) : null}
-
-            {activeWorkspaceTab === "compare" ? (
-              <>
-                <SectionTitle title="Comparison Dashboard" subtitle="Compare generated and manually edited solutions side by side." />
-                {project.solutions.length === 0 ? (
-                  <p className="empty-state">No solutions available for comparison.</p>
-                ) : (
-                  <ComparisonDashboard
-                    solutions={project.solutions}
-                    activeSolutionId={activeSolution?.solution_id ?? null}
-                    courseByCode={courseByCode}
-                    onSelectSolution={setSelectedSolutionId}
-                  />
-                )}
-              </>
-            ) : null}
-
-            {activeWorkspaceTab === "graph" ? (
-              <>
-                <SectionTitle title="Dependency Graph" subtitle="See why a course is hard to move by following semester and prerequisite links." />
-                {project.courses.length === 0 ? (
-                  <p className="empty-state">Add courses to see the constraint graph.</p>
-                ) : (
-                  <DependencyGraph
-                    courses={project.courses}
-                    solution={activeSolution}
-                    edges={dependencyEdges}
-                    focusCourseCode={graphFocusCourseCode}
-                    changedCourseCodes={changedCourseCodes}
-                    onSelectCourse={(courseCode) => setGraphFocusCourseCode(courseCode || null)}
-                  />
-                )}
-              </>
-            ) : null}
-          </div>
-        </section>
-
-        <section className="panel panel-wide route-panel">
-          <SectionTitle title="Solution Details" subtitle="Secondary detail table with direct date input controls for the active solution." />
-          {activeSolution ? (
-            <SolutionCard
-              solution={activeSolution}
-              courseNameByCode={courseNameByCode}
-              courseByCode={courseByCode}
-              moveDrafts={moveDrafts}
-              movingExamKey={movingExamKey}
-              disabled={busyAction !== null}
-              showChanges={showChanges}
-              onDraftChange={(solutionId, courseCode, moedNumber, nextDate) => {
-                setMoveDrafts((current) => ({
-                  ...current,
-                  [getExamMoveKey(solutionId, courseCode, moedNumber)]: nextDate,
-                }));
-              }}
-              onMove={handleManualMove}
-            />
-          ) : (
-            <p className="empty-state">No active solution selected.</p>
-          )}
-        </section>
-
-        <section className="panel panel-wide route-panel">
-          <SectionTitle title="Issues" subtitle="Validation and solver feedback will appear here." />
-          <IssueList issues={project.issues} />
-        </section>
-          </>
-        ) : null}
-      </main>
-
-      {showSolveSuccessModal ? (
-        <div className="app-modal-backdrop" role="presentation" onClick={() => setShowSolveSuccessModal(false)}>
           <div
-            className="app-modal-panel"
-            role="dialog"
-            aria-modal="true"
-            aria-labelledby="solve-success-title"
-            onClick={(event) => event.stopPropagation()}
+            id="action-status"
+            className={cn(
+              "fixed bottom-3 z-40 max-w-[48vw] rounded-xl border border-slate-200/80 bg-white/90 px-4 py-3 shadow-lg backdrop-blur-md",
+              collapsedSidebar ? "left-24" : "left-80"
+            )}
           >
-            <span className="app-modal-kicker">Generation complete</span>
-            <h2 id="solve-success-title">Schedules are ready</h2>
-            <p>
-              The solver finished successfully and you have been redirected to the schedule workspace to review the generated options.
-            </p>
-            <div className="app-modal-actions">
-              <button type="button" className="accent-button" onClick={() => setShowSolveSuccessModal(false)}>
-                View schedule
-              </button>
+            <div className="flex items-center gap-2 text-sm text-slate-600">
+              <CircleDashed className="h-4 w-4" />
+              <span>{actionStatus}</span>
             </div>
           </div>
+
+          <div id="action-controls" className="fixed bottom-3 right-6 z-50 flex items-center gap-2 rounded-xl border border-slate-200/80 bg-white/92 px-3 py-2 shadow-lg backdrop-blur-md">
+            {activeRoute === "setup" ? (
+              <>
+                <Button type="button" variant="secondary" onClick={() => void handleValidate()} disabled={busyAction !== null}>
+                  {busyAction === "validate" ? "Validating..." : "Validate Draft"}
+                </Button>
+                <Button type="button" onClick={() => void handleSolve()} disabled={busyAction !== null}>
+                  {busyAction === "solve" ? "Generating..." : "Generate Options"}
+                </Button>
+              </>
+            ) : (
+              <>
+                <Button
+                  type="button"
+                  variant="secondary"
+                  disabled={busyAction !== null}
+                  onClick={() => setShowConflictDrawer((current) => !current)}
+                >
+                  {showConflictDrawer ? "Hide Conflicts" : "Conflicts"}
+                </Button>
+                <Button type="button" onClick={() => void handleSolve()} disabled={busyAction !== null}>
+                  {busyAction === "solve" ? "Optimizing..." : "Optimize"}
+                </Button>
+                <Button type="button" variant="secondary" onClick={() => void handleSaveSelectedSolutionToDatabase()} disabled={busyAction !== null}>
+                  Save Solution To Database
+                </Button>
+              </>
+            )}
+            {busyAction === "solve" ? (
+              <Button type="button" variant="destructive" onClick={handleTerminateSolve}>
+                <X className="mr-1 h-4 w-4" />
+                Terminate
+              </Button>
+            ) : null}
+          </div>
+
+          {activeRoute === "schedule" && selectedScheduleSolution && showConflictDrawer ? (
+            <div className="conflict-bubble-popover">
+              <ConflictDrawer
+                selectedExam={selectedScheduleExam}
+                selectedMoedNumber={selectedScheduleMoedNumber}
+                originalExamDate={selectedScheduleOriginalDate}
+                conflictIssues={selectedScheduleConflictIssues}
+                activeConflict={activeConflict}
+                onSelectConflict={setActiveConflict}
+                onClose={() => setShowConflictDrawer(false)}
+              />
+            </div>
+          ) : null}
         </div>
-      ) : null}
+      </div>
     </div>
   );
 }
