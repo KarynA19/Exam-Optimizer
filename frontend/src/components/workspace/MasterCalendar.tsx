@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 
-import type { CourseInput, ScheduleProject, ScheduleSolution, ScheduledExam, ValidationIssue } from "../../types";
+import type { CourseInput, FixedExam, ScheduleProject, ScheduleSolution, ScheduledExam, ValidationIssue } from "../../types";
 import { getDepartmentClassName, getDepartmentLabel, getDepartmentShortLabel } from "../../utils/departmentUtils";
 import { diffDays, formatCalendarLabel, formatDisplayDate, toDate } from "../../utils/dateHelpers";
 import { getPreviewKey, hasExamChanged } from "../../utils/examKeys";
@@ -88,6 +88,21 @@ export function MasterCalendar({
     }
     return tokenMap;
   }, [visibleExams]);
+  const fixedExamByCourseCode = useMemo(() => {
+    const map = new Map<string, FixedExam>();
+    for (const fixedExam of project.fixed_exams) {
+      map.set(fixedExam.course_code, fixedExam);
+    }
+    return map;
+  }, [project.fixed_exams]);
+
+  function getExamSemester(exam: ScheduledExam): number | null {
+    const fixedExamSemester = fixedExamByCourseCode.get(exam.course_code)?.semester_number;
+    if (exam.source === "fixed" && typeof fixedExamSemester === "number") {
+      return fixedExamSemester;
+    }
+    return courseByCode[exam.course_code]?.semester_number ?? null;
+  }
 
   function getMoedWindowForDate(dateText: string) {
     return project.moed_windows.find((window) => window.start_date <= dateText && dateText <= window.end_date) ?? null;
@@ -162,14 +177,14 @@ export function MasterCalendar({
 
         const dayCells = semesterRows.map((semesterNumber) => {
           const rowExams = visibleExams.filter(
-            (exam) => courseByCode[exam.course_code]?.semester_number === semesterNumber && exam.exam_date === dateText,
+            (exam) => getExamSemester(exam) === semesterNumber && exam.exam_date === dateText,
           );
           const previewKey = selectedExam ? getPreviewKey(solution.solution_id, selectedExam.course_code, selectedExam.moed_number, dateText) : null;
           const previewResponse = previewKey ? previewResponses[previewKey] : undefined;
           const cellPreviewStatus = getPreviewStatus(solution, dateText, selectedExam, previewResponse);
           const inFocusWindow = selectedExam ? diffDays(selectedExam.exam_date, dateText) <= 3 : true;
           const selectedSemester = selectedExam
-            ? courseByCode[selectedExam.course_code]?.semester_number === semesterNumber
+            ? getExamSemester(selectedExam) === semesterNumber
             : false;
           const canPreview = selectedSemester && !isSaturday && !isExcluded;
           const cellClassName = [
@@ -230,6 +245,7 @@ export function MasterCalendar({
                   ? activeConflict.related_date === exam.exam_date
                   : selectedExam?.exam_date === exam.exam_date;
                 const showConflictNote = Boolean(activeConflict && matchesConflictCourse && matchesConflictDate);
+                const examSemesterNumber = getExamSemester(exam) ?? semesterNumber;
 
                 return (
                   <div key={`${exam.course_code}-${exam.moed_number}-${exam.exam_date}`} className="calendar-event-stack">
@@ -281,7 +297,7 @@ export function MasterCalendar({
                       <strong>{`${exam.course_code} - ${courseNameByCode[exam.course_code] ?? exam.course_code}`}</strong>
                       <span className="exam-chip-meta">
                         <span className={["department-badge", getDepartmentClassName(course)].join(" ")}>{getDepartmentShortLabel(course)}</span>
-                        <span>Semester {course?.semester_number ?? semesterNumber}</span>
+                        <span>Semester {examSemesterNumber}</span>
                         {exam.source === "fixed" ? <span className="source-chip">Fixed</span> : null}
                       </span>
                     </button>

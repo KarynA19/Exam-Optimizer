@@ -34,6 +34,7 @@ COURSE_DISPLAY_HEADERS = [
 FIXED_EXAMS_EXPECTED_HEADERS = [
     "course id",
     "course name",
+    "semester",
     "exam date",
     "prerequisites",
     "department",
@@ -42,6 +43,7 @@ FIXED_EXAMS_EXPECTED_HEADERS = [
 FIXED_EXAMS_DISPLAY_HEADERS = [
     "Course ID",
     "Course Name",
+    "Semester",
     "Exam Date",
     "Prerequisites",
     "Department",
@@ -186,6 +188,13 @@ def _parse_semester(value: object) -> int:
         raise ValueError("Semester must be a number between 1 and 12.") from error
 
 
+def _parse_fixed_exam_semester(value: object) -> int:
+    semester_number = _parse_semester(value)
+    if semester_number < 1 or semester_number > 8:
+        raise ValueError("Semester must be a number between 1 and 8.")
+    return semester_number
+
+
 def _parse_high_failure(value: object) -> bool:
     if isinstance(value, bool):
         return value
@@ -245,7 +254,7 @@ def export_course_template_excel() -> bytes:
 
     fixed_exams_worksheet = workbook.create_sheet(FIXED_EXAMS_SHEET_NAME)
     fixed_exams_worksheet.append(FIXED_EXAMS_DISPLAY_HEADERS)
-    fixed_exams_worksheet.append(["EXAMPLE_CS101", "Example Course", "2026-06-20", "", "SW"])
+    fixed_exams_worksheet.append(["EXAMPLE_CS101", "Example Course", 1, "2026-06-20", "", "SW"])
 
     buffer = BytesIO()
     workbook.save(buffer)
@@ -279,7 +288,7 @@ def import_courses_from_excel(content: bytes) -> CourseImportResponse:
             )
         ])
 
-    fixed_header_labels = [_cell_text(fixed_exams_worksheet.cell(row=1, column=column).value) for column in range(1, 6)]
+    fixed_header_labels = [_cell_text(fixed_exams_worksheet.cell(row=1, column=column).value) for column in range(1, 7)]
     fixed_headers = [_normalize_header(header) for header in fixed_header_labels]
     if fixed_headers != FIXED_EXAMS_EXPECTED_HEADERS:
         raise CourseImportError([
@@ -331,7 +340,7 @@ def import_courses_from_excel(content: bytes) -> CourseImportResponse:
                 issues.append(_build_issue(validation_error["msg"], row_number=row_number, course_code=course_code or None))
 
     for row_number in range(2, fixed_exams_worksheet.max_row + 1):
-        raw_values = [fixed_exams_worksheet.cell(row=row_number, column=column).value for column in range(1, 6)]
+        raw_values = [fixed_exams_worksheet.cell(row=row_number, column=column).value for column in range(1, 7)]
         if all(_cell_text(value) == "" for value in raw_values):
             continue
         if _is_example_row(raw_values):
@@ -339,15 +348,17 @@ def import_courses_from_excel(content: bytes) -> CourseImportResponse:
 
         course_code = _cell_text(raw_values[0])
         course_name = _cell_text(raw_values[1])
-        prerequisite_codes = _cell_text(raw_values[3])
+        prerequisite_codes = _cell_text(raw_values[4])
 
         try:
-            exam_date = _parse_exam_date(raw_values[2])
-            department = _parse_department(raw_values[4])
+            semester_number = _parse_fixed_exam_semester(raw_values[2])
+            exam_date = _parse_exam_date(raw_values[3])
+            department = _parse_department(raw_values[5])
             fixed_exams.append(
                 FixedExam(
                     course_code=course_code,
                     course_name=course_name,
+                    semester_number=semester_number,
                     prerequisite_course_codes=prerequisite_codes,
                     exam_date=exam_date,
                     locked=True,

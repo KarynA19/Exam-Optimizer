@@ -69,6 +69,7 @@ def normalize_prerequisite_course_codes(value: object) -> list[str]:
 class FixedExam(BaseModel):
     course_code: str = Field(min_length=1, max_length=30)
     course_name: str = Field(min_length=1, max_length=160)
+    semester_number: int | None = Field(default=None, ge=1, le=8)
     prerequisite_course_codes: list[str] = Field(
         default_factory=list,
         validation_alias=AliasChoices("prerequisite_course_codes", "prerequisite_course_code"),

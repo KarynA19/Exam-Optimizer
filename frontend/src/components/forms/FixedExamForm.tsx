@@ -23,6 +23,7 @@ export function FixedExamForm({
 }) {
   const [courseCode, setCourseCode] = useState(initialValue?.course_code ?? "");
   const [courseName, setCourseName] = useState(initialValue?.course_name ?? "");
+  const [semesterNumber, setSemesterNumber] = useState(initialValue?.semester_number ?? 1);
   const [prerequisiteCourseCodes, setPrerequisiteCourseCodes] = useState(
     initialValue?.prerequisite_course_codes.join(", ") ?? "",
   );
@@ -37,6 +38,7 @@ export function FixedExamForm({
         onSubmit({
           course_code: courseCode,
           course_name: courseName,
+          semester_number: semesterNumber,
           prerequisite_course_codes: parsePrerequisiteCourseCodes(prerequisiteCourseCodes),
           exam_date: examDate,
           locked: true,
@@ -44,6 +46,7 @@ export function FixedExamForm({
         });
         setCourseCode("");
         setCourseName("");
+        setSemesterNumber(1);
         setPrerequisiteCourseCodes("");
         setExamDate("");
         setDepartment("ALL");
@@ -57,6 +60,20 @@ export function FixedExamForm({
         <label>
           <span>Course name</span>
           <input value={courseName} onChange={(event) => setCourseName(event.target.value)} required />
+        </label>
+        <label>
+          <span>Semester</span>
+          <input
+            type="number"
+            min={1}
+            max={8}
+            value={semesterNumber}
+            onChange={(event) => {
+              const parsed = Number(event.target.value);
+              setSemesterNumber(Number.isFinite(parsed) ? Math.max(1, Math.min(8, Math.trunc(parsed))) : 1);
+            }}
+            required
+          />
         </label>
         <label>
           <span>Exam date</span>

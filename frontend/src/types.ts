@@ -27,6 +27,7 @@ export type ExcludedDateRange = DateRange & {
 export type FixedExam = {
   course_code: string;
   course_name: string;
+  semester_number: number;
   prerequisite_course_codes: string[];
   exam_date: string;
   locked: boolean;

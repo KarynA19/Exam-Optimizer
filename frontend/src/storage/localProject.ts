@@ -42,6 +42,15 @@ function normalizeSolutionDiagnostics(value: unknown): { target_gap_days: number
   };
 }
 
+function normalizeFixedExamSemester(value: unknown): number {
+  const parsed = typeof value === "number" ? value : Number(value);
+  if (!Number.isFinite(parsed)) {
+    return 1;
+  }
+
+  return Math.max(1, Math.min(8, Math.trunc(parsed)));
+}
+
 function normalizeMoedWindows(value: unknown, fallbackGaps?: { same_semester_gap_days?: number; prerequisite_gap_days?: number; high_failure_gap_days?: number }): MoedWindow[] {
   if (Array.isArray(value) && value.length > 0) {
     return value.map((window, index) => {
@@ -104,6 +113,7 @@ function normalizeProject(parsed: Partial<ScheduleProject> | null | undefined): 
       parsed?.fixed_exams?.map((exam) => ({
         ...exam,
         course_name: exam.course_name ?? "",
+        semester_number: normalizeFixedExamSemester((exam as { semester_number?: unknown }).semester_number),
         prerequisite_course_codes: normalizePrerequisiteCourseCodes(
           (exam as { prerequisite_course_codes?: string[] | string | null; prerequisite_course_code?: string | null })
             .prerequisite_course_codes ??

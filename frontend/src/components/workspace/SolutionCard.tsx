@@ -2,6 +2,7 @@ import { IssueList } from "../common/IssueList";
 import type { CourseInput, ScheduleSolution, ScheduledExam } from "../../types";
 import { getDepartmentClassName, getDepartmentShortLabel } from "../../utils/departmentUtils";
 import { getExamMoveKey, getOriginalExam, hasExamChanged } from "../../utils/examKeys";
+import { formatDisplayDate } from "../../utils/dateHelpers";
 
 export function SolutionCard({
   solution,
@@ -84,8 +85,8 @@ export function SolutionCard({
                       <span className={["department-badge", getDepartmentClassName(course)].join(" ")}>{getDepartmentShortLabel(course)}</span>
                     </td>
                     <td>{course && course.prerequisite_course_codes.length > 0 ? course.prerequisite_course_codes.join(", ") : "-"}</td>
-                    <td>{exam.exam_date}</td>
-                    <td>{originalExam?.exam_date ?? "-"}</td>
+                    <td>{formatDisplayDate(exam.exam_date)}</td>
+                    <td>{originalExam?.exam_date ? formatDisplayDate(originalExam.exam_date) : "-"}</td>
                     <td>
                       <span className={`solution-source source-${exam.source}`}>{exam.source}</span>
                     </td>

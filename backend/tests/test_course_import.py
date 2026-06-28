@@ -19,7 +19,7 @@ def build_workbook_bytes(
         worksheet.append(row)
 
     fixed_worksheet = workbook.create_sheet("Fixed Exams")
-    fixed_worksheet.append(fixed_headers or ["Course ID", "Course Name", "Exam Date", "Prerequisites", "Department"])
+    fixed_worksheet.append(fixed_headers or ["Course ID", "Course Name", "Semester", "Exam Date", "Prerequisites", "Department"])
     for row in fixed_rows or []:
         fixed_worksheet.append(row)
 
@@ -79,7 +79,7 @@ def test_import_courses_from_excel_rejects_invalid_headers() -> None:
 def test_import_courses_from_excel_rejects_invalid_fixed_exam_headers() -> None:
     content = build_workbook_bytes(
         [["ALG1", "Algebra 1", 1, "yes", "", ""]],
-        fixed_headers=["Wrong", "Course Name", "Exam Date", "Prerequisites", "Department"],
+        fixed_headers=["Wrong", "Course Name", "Semester", "Exam Date", "Prerequisites", "Department"],
     )
 
     try:
@@ -158,10 +158,10 @@ def test_export_course_template_excel_uses_current_headers() -> None:
     fixed_sheet = workbook["Fixed Exams"]
 
     course_headers = [courses_sheet.cell(row=1, column=column).value for column in range(1, 7)]
-    fixed_headers = [fixed_sheet.cell(row=1, column=column).value for column in range(1, 6)]
+    fixed_headers = [fixed_sheet.cell(row=1, column=column).value for column in range(1, 7)]
 
     assert course_headers == ["Course ID", "Course Name", "Semester", "Is High Failure", "Prerequisites", "Department"]
-    assert fixed_headers == ["Course ID", "Course Name", "Exam Date", "Prerequisites", "Department"]
+    assert fixed_headers == ["Course ID", "Course Name", "Semester", "Exam Date", "Prerequisites", "Department"]
     assert str(courses_sheet.cell(row=2, column=1).value).startswith("EXAMPLE")
     assert str(fixed_sheet.cell(row=2, column=1).value).startswith("EXAMPLE")
 
@@ -173,8 +173,8 @@ def test_import_courses_from_excel_parses_fixed_exams_and_skips_example_rows() -
             ["ALG1", "Algebra 1", 1, "yes", "", ""],
         ],
         fixed_rows=[
-            ["EXAMPLE_CS101", "Example Course", "2026-06-22", "", "SW"],
-            ["ALG1", "Algebra 1", "2026-06-22", "", "SW"],
+            ["EXAMPLE_CS101", "Example Course", 1, "2026-06-22", "", "SW"],
+            ["ALG1", "Algebra 1", 1, "2026-06-22", "", "SW"],
         ],
     )
 
@@ -184,3 +184,4 @@ def test_import_courses_from_excel_parses_fixed_exams_and_skips_example_rows() -
     assert result.fixed_exams_imported_count == 1
     assert result.courses[0].course_code == "ALG1"
     assert result.fixed_exams[0].course_code == "ALG1"
+    assert result.fixed_exams[0].semester_number == 1

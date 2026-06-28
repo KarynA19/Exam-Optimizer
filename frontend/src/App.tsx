@@ -95,6 +95,7 @@ type CourseDraft = {
 type FixedDraft = {
   course_code: string;
   course_name: string;
+  semester_number: number;
   exam_date: string;
   department: CourseDepartment;
   prerequisite_course_codes: string[];
@@ -180,6 +181,46 @@ function parseBoundedInteger(value: string, min: number, max: number, fallback: 
   return Math.max(min, Math.min(max, Math.trunc(parsed)));
 }
 
+function normalizePrerequisiteCourseCodes(value: unknown): string[] {
+  if (Array.isArray(value)) {
+    return value.map((entry) => String(entry).trim()).filter((entry) => entry.length > 0);
+  }
+
+  if (typeof value === "string") {
+    return value
+      .replace(/;/g, ",")
+      .split(",")
+      .map((entry) => entry.trim())
+      .filter((entry) => entry.length > 0);
+  }
+
+  return [];
+}
+
+function normalizeIncomingCourse(course: Partial<CourseInput> & { prerequisite_course_code?: unknown }): CourseInput {
+  return {
+    course_code: String(course.course_code ?? "").trim(),
+    course_name: String(course.course_name ?? course.course_code ?? "").trim(),
+    semester_number: parseBoundedInteger(String(course.semester_number ?? 1), 1, 8, 1),
+    high_failure_rate: Boolean(course.high_failure_rate),
+    department: course.department === "SW" || course.department === "IS" ? course.department : null,
+    prerequisite_course_codes: normalizePrerequisiteCourseCodes(course.prerequisite_course_codes ?? course.prerequisite_course_code),
+  };
+}
+
+function normalizeIncomingFixedExam(exam: Partial<FixedExam> & { prerequisite_course_code?: unknown }): FixedExam {
+  return {
+    course_code: String(exam.course_code ?? "").trim(),
+    course_name: String(exam.course_name ?? exam.course_code ?? "").trim(),
+    semester_number: parseBoundedInteger(String(exam.semester_number ?? 1), 1, 8, 1),
+    prerequisite_course_codes: normalizePrerequisiteCourseCodes(exam.prerequisite_course_codes ?? exam.prerequisite_course_code),
+    exam_date: String(exam.exam_date ?? ""),
+    locked: exam.locked !== false,
+    department: exam.department === "SW" || exam.department === "IS" ? exam.department : null,
+    reason: exam.reason ?? null,
+  };
+}
+
 function inferSemesterFromCourseCode(courseCode: string): number {
   const digits = courseCode.replace(/\D/g, "");
   if (!digits) {
@@ -248,10 +289,12 @@ function formatRangeLabel(range: DateRange | undefined) {
   if (!range?.from) {
     return "Pick date range";
   }
+  const fromLabel = formatDisplayDate(format(range.from, "yyyy-MM-dd"));
   if (!range.to) {
-    return format(range.from, "PPP");
+    return fromLabel;
   }
-  return `${format(range.from, "PPP")} - ${format(range.to, "PPP")}`;
+  const toLabel = formatDisplayDate(format(range.to, "yyyy-MM-dd"));
+  return `${fromLabel} - ${toLabel}`;
 }
 
 function MultiSelectCombobox({
@@ -390,6 +433,7 @@ function App() {
   const [fixedDraft, setFixedDraft] = useState<FixedDraft>({
     course_code: "",
     course_name: "",
+    semester_number: 1,
     exam_date: "",
     department: null,
     prerequisite_course_codes: [],
@@ -513,8 +557,14 @@ function App() {
   );
 
   const scheduleSemesterRows = useMemo(
-    () => Array.from(new Set(Object.values(courseByCode).map((course) => course.semester_number))).sort((left, right) => left - right),
-    [courseByCode],
+    () =>
+      Array.from(
+        new Set([
+          ...Object.values(courseByCode).map((course) => course.semester_number),
+          ...project.fixed_exams.map((exam) => exam.semester_number),
+        ]),
+      ).sort((left, right) => left - right),
+    [courseByCode, project.fixed_exams],
   );
 
   const scheduleCalendarDays = useMemo(
@@ -758,7 +808,10 @@ function App() {
       {
         accessorKey: "prerequisite_course_codes",
         header: "Prerequisites",
-        cell: ({ row }) => (row.original.prerequisite_course_codes.length > 0 ? row.original.prerequisite_course_codes.join(", ") : "-"),
+        cell: ({ row }) => {
+          const prerequisites = normalizePrerequisiteCourseCodes(row.original.prerequisite_course_codes);
+          return prerequisites.length > 0 ? prerequisites.join(", ") : "-";
+        },
       },
       {
         id: "actions",
@@ -936,30 +989,34 @@ function App() {
   }
 
   function applyCoursesImportMode(existing: CourseInput[], incoming: CourseInput[], mode: ImportMode): CourseInput[] {
+    const existingCourses = Array.isArray(existing) ? existing : [];
+    const incomingCourses = Array.isArray(incoming) ? incoming : [];
     if (mode === "replace") {
-      return incoming;
+      return incomingCourses;
     }
     if (mode === "append") {
-      return [...existing, ...incoming];
+      return [...existingCourses, ...incomingCourses];
     }
 
-    const merged = new Map(existing.map((course) => [course.course_code, course]));
-    for (const course of incoming) {
+    const merged = new Map(existingCourses.map((course) => [course.course_code, course]));
+    for (const course of incomingCourses) {
       merged.set(course.course_code, course);
     }
     return Array.from(merged.values());
   }
 
   function applyFixedExamsImportMode(existing: FixedExam[], incoming: FixedExam[], mode: ImportMode): FixedExam[] {
+    const existingFixedExams = Array.isArray(existing) ? existing : [];
+    const incomingFixedExams = Array.isArray(incoming) ? incoming : [];
     if (mode === "replace") {
-      return incoming;
+      return incomingFixedExams;
     }
     if (mode === "append") {
-      return [...existing, ...incoming];
+      return [...existingFixedExams, ...incomingFixedExams];
     }
 
-    const merged = new Map(existing.map((exam) => [exam.course_code, exam]));
-    for (const exam of incoming) {
+    const merged = new Map(existingFixedExams.map((exam) => [exam.course_code, exam]));
+    for (const exam of incomingFixedExams) {
       merged.set(exam.course_code, exam);
     }
     return Array.from(merged.values());
@@ -978,9 +1035,10 @@ function App() {
 
     try {
       const incomingCourses = await loadRemoteSetupCourses(setupId);
-      const nextCourses = applyCoursesImportMode(project.courses, incomingCourses, mode);
+      const normalizedIncomingCourses = (incomingCourses ?? []).map((course) => normalizeIncomingCourse(course));
+      const nextCourses = applyCoursesImportMode(project.courses, normalizedIncomingCourses, mode);
       patchProject({ courses: nextCourses });
-      setActionStatus(`Imported ${incomingCourses.length} courses using ${mode} mode.`);
+      setActionStatus(`Imported ${normalizedIncomingCourses.length} courses using ${mode} mode.`);
     } catch (error) {
       setActionStatus(formatApiErrorMessage(error, "Failed to import courses from saved setup."));
     }
@@ -999,9 +1057,10 @@ function App() {
 
     try {
       const incomingFixedExams = await loadRemoteSetupFixedExams(setupId);
-      const nextFixedExams = applyFixedExamsImportMode(project.fixed_exams, incomingFixedExams, mode);
+      const normalizedIncomingFixedExams = (incomingFixedExams ?? []).map((exam) => normalizeIncomingFixedExam(exam));
+      const nextFixedExams = applyFixedExamsImportMode(project.fixed_exams, normalizedIncomingFixedExams, mode);
       patchProject({ fixed_exams: nextFixedExams });
-      setActionStatus(`Imported ${incomingFixedExams.length} fixed exams using ${mode} mode.`);
+      setActionStatus(`Imported ${normalizedIncomingFixedExams.length} fixed exams using ${mode} mode.`);
     } catch (error) {
       setActionStatus(formatApiErrorMessage(error, "Failed to import fixed exams from saved setup."));
     }
@@ -1161,6 +1220,10 @@ function App() {
     const lockedExam: FixedExam = {
       course_code: exam.course_code,
       course_name: course?.course_name ?? exam.course_code,
+      semester_number:
+        project.fixed_exams.find((fixedExam) => fixedExam.course_code === exam.course_code)?.semester_number
+        ?? course?.semester_number
+        ?? inferSemesterFromCourseCode(exam.course_code),
       exam_date: exam.exam_date,
       locked: true,
       department: course?.department ?? null,
@@ -1217,9 +1280,11 @@ function App() {
 
     try {
       const result: CourseImportResponse = await importCoursesSpreadsheet(file);
-      patchProject({ courses: result.courses, fixed_exams: result.fixed_exams });
+      const normalizedCourses = (result.courses ?? []).map((course) => normalizeIncomingCourse(course));
+      const normalizedFixedExams = (result.fixed_exams ?? []).map((exam) => normalizeIncomingFixedExam(exam));
+      patchProject({ courses: normalizedCourses, fixed_exams: normalizedFixedExams });
       setActionStatus(
-        `Imported ${result.imported_count} course(s) and ${result.fixed_exams_imported_count} fixed exam(s) from ${file.name}.`,
+        `Imported ${normalizedCourses.length} course(s) and ${normalizedFixedExams.length} fixed exam(s) from ${file.name}.`,
       );
     } catch (error) {
       if (Array.isArray(error)) {
@@ -1280,6 +1345,7 @@ function App() {
       ...fixedDraft,
       course_code: fixedDraft.course_code.trim(),
       course_name: fixedDraft.course_name.trim(),
+      semester_number: parseBoundedInteger(String(fixedDraft.semester_number), 1, 8, 1),
       locked: true,
     };
 
@@ -1287,6 +1353,7 @@ function App() {
     setFixedDraft({
       course_code: "",
       course_name: "",
+      semester_number: 1,
       exam_date: "",
       department: null,
       prerequisite_course_codes: [],
@@ -1335,6 +1402,7 @@ function App() {
     setFixedDraft({
       course_code: "",
       course_name: "",
+      semester_number: 1,
       exam_date: "",
       department: null,
       prerequisite_course_codes: [],
@@ -1638,6 +1706,23 @@ function App() {
                           </FormField>
                           <FormField>
                             <FormItem>
+                              <Label>Semester</Label>
+                              <Input
+                                type="number"
+                                min={1}
+                                max={8}
+                                value={fixedDraft.semester_number}
+                                onChange={(event) =>
+                                  setFixedDraft((current) => ({
+                                    ...current,
+                                    semester_number: parseBoundedInteger(event.target.value, 1, 8, current.semester_number),
+                                  }))
+                                }
+                              />
+                            </FormItem>
+                          </FormField>
+                          <FormField>
+                            <FormItem>
                               <Label>Exam Date</Label>
                               <Popover>
                                 <PopoverTrigger asChild>
@@ -1702,7 +1787,7 @@ function App() {
                             <div key={`${exam.course_code}-${index}`} className="flex items-center justify-between rounded-lg border border-slate-200 px-3 py-2">
                               <div>
                                 <p className="text-sm font-medium">{exam.course_code} - {exam.course_name}</p>
-                                <p className="text-xs text-slate-500">{formatDisplayDate(exam.exam_date)} | Department: {exam.department ?? "ALL"} | Prerequisites: {exam.prerequisite_course_codes.join(", ") || "-"}</p>
+                                <p className="text-xs text-slate-500">Semester {exam.semester_number} | {formatDisplayDate(exam.exam_date)} | Department: {exam.department ?? "ALL"} | Prerequisites: {exam.prerequisite_course_codes.join(", ") || "-"}</p>
                               </div>
                               <Button
                                 type="button"
