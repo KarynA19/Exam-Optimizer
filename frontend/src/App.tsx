@@ -462,6 +462,19 @@ function App() {
   }, [project]);
 
   useEffect(() => {
+    const handler = () => {
+      const nextUserId = getStoredAuthUserId();
+      setAuthUserId(nextUserId);
+      if (!getStoredAuthToken()) {
+        setRemoteSavedSetups([]);
+      }
+    };
+
+    window.addEventListener("exam-optimizer-auth-state-changed", handler);
+    return () => window.removeEventListener("exam-optimizer-auth-state-changed", handler);
+  }, []);
+
+  useEffect(() => {
     if (!getStoredAuthToken()) {
       return;
     }

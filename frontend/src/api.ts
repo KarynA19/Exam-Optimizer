@@ -28,6 +28,27 @@ function resolveApiBase(): string {
 const API_BASE = resolveApiBase();
 const AUTH_TOKEN_KEY = "exam_optimizer_auth_token";
 const AUTH_USER_ID_KEY = "exam_optimizer_auth_user_id";
+const AUTH_STATE_EVENT = "exam-optimizer-auth-state-changed";
+
+function emitAuthStateChanged() {
+  window.dispatchEvent(new CustomEvent(AUTH_STATE_EVENT));
+}
+
+export function clearStoredAuth() {
+  window.localStorage.removeItem(AUTH_TOKEN_KEY);
+  window.localStorage.removeItem(AUTH_USER_ID_KEY);
+  emitAuthStateChanged();
+}
+
+async function buildErrorFromResponse(response: Response, fallback: string): Promise<Error> {
+  const detail = await response.json().catch(() => null);
+  if (response.status === 401) {
+    clearStoredAuth();
+    return new Error("Session expired. Please log in again.");
+  }
+
+  return new Error(detail?.detail ?? fallback);
+}
 
 export function getStoredAuthToken(): string | null {
   return window.localStorage.getItem(AUTH_TOKEN_KEY);
@@ -35,12 +56,12 @@ export function getStoredAuthToken(): string | null {
 
 export function setStoredAuthToken(token: string | null) {
   if (!token) {
-    window.localStorage.removeItem(AUTH_TOKEN_KEY);
-    window.localStorage.removeItem(AUTH_USER_ID_KEY);
+    clearStoredAuth();
     return;
   }
 
   window.localStorage.setItem(AUTH_TOKEN_KEY, token);
+  emitAuthStateChanged();
 }
 
 export function getStoredAuthUserId(): string | null {
@@ -50,10 +71,12 @@ export function getStoredAuthUserId(): string | null {
 export function setStoredAuthUserId(userId: string | null) {
   if (!userId) {
     window.localStorage.removeItem(AUTH_USER_ID_KEY);
+    emitAuthStateChanged();
     return;
   }
 
   window.localStorage.setItem(AUTH_USER_ID_KEY, userId);
+  emitAuthStateChanged();
 }
 
 function buildAuthHeaders(): HeadersInit {
@@ -71,8 +94,7 @@ export async function loginToBackend(userId: string, password: string): Promise<
   });
 
   if (!response.ok) {
-    const detail = await response.json().catch(() => null);
-    throw new Error(detail?.detail ?? "Login failed.");
+    throw await buildErrorFromResponse(response, "Login failed.");
   }
 
   const payload = await response.json() as AuthLoginResponse;
@@ -91,6 +113,9 @@ export async function validateProject(project: ScheduleProject): Promise<Schedul
   });
 
   if (!response.ok) {
+    if (response.status === 401) {
+      clearStoredAuth();
+    }
     throw new Error("Validation request failed.");
   }
 
@@ -111,6 +136,9 @@ export async function solveProject(
   });
 
   if (!response.ok) {
+    if (response.status === 401) {
+      clearStoredAuth();
+    }
     const detail = await response.json().catch(() => null);
     throw new Error(detail ? JSON.stringify(detail) : "Solve request failed.");
   }
@@ -140,6 +168,9 @@ export async function manualMoveProject(
   });
 
   if (!response.ok) {
+    if (response.status === 401) {
+      clearStoredAuth();
+    }
     const detail = await response.json().catch(() => null);
     throw new Error(detail ? JSON.stringify(detail) : "Manual move request failed.");
   }
@@ -169,6 +200,9 @@ export async function explainMoveProject(
   });
 
   if (!response.ok) {
+    if (response.status === 401) {
+      clearStoredAuth();
+    }
     const detail = await response.json().catch(() => null);
     throw new Error(detail ? JSON.stringify(detail) : "Move preview request failed.");
   }
@@ -186,6 +220,9 @@ export async function importCoursesSpreadsheet(file: File): Promise<CourseImport
   });
 
   if (!response.ok) {
+    if (response.status === 401) {
+      clearStoredAuth();
+    }
     const detail = await response.json().catch(() => null);
     if (Array.isArray(detail?.detail)) {
       throw detail.detail as ValidationIssue[];
@@ -205,6 +242,9 @@ export async function downloadCourseTemplate(): Promise<Blob> {
   });
 
   if (!response.ok) {
+    if (response.status === 401) {
+      clearStoredAuth();
+    }
     throw new Error("Course template download failed.");
   }
 
@@ -219,8 +259,7 @@ export async function listRemoteSavedSetups(): Promise<RemoteSavedSetupSummary[]
   });
 
   if (!response.ok) {
-    const detail = await response.json().catch(() => null);
-    throw new Error(detail?.detail ?? "Failed to list saved setups.");
+    throw await buildErrorFromResponse(response, "Failed to list saved setups.");
   }
 
   return response.json();
@@ -245,8 +284,7 @@ export async function saveRemoteSetup(
   });
 
   if (!response.ok) {
-    const detail = await response.json().catch(() => null);
-    throw new Error(detail?.detail ?? "Failed to save setup.");
+    throw await buildErrorFromResponse(response, "Failed to save setup.");
   }
 
   return response.json();
@@ -260,8 +298,7 @@ export async function loadRemoteSetup(setupId: string): Promise<RemoteSavedSetup
   });
 
   if (!response.ok) {
-    const detail = await response.json().catch(() => null);
-    throw new Error(detail?.detail ?? "Failed to load setup.");
+    throw await buildErrorFromResponse(response, "Failed to load setup.");
   }
 
   return response.json();
@@ -276,8 +313,7 @@ export async function deleteRemoteSetup(setupId: string): Promise<void> {
   });
 
   if (!response.ok) {
-    const detail = await response.json().catch(() => null);
-    throw new Error(detail?.detail ?? "Failed to delete setup.");
+    throw await buildErrorFromResponse(response, "Failed to delete setup.");
   }
 }
 
@@ -299,8 +335,7 @@ export async function updateRemoteSetupSolutions(
   });
 
   if (!response.ok) {
-    const detail = await response.json().catch(() => null);
-    throw new Error(detail?.detail ?? "Failed to update setup solutions.");
+    throw await buildErrorFromResponse(response, "Failed to update setup solutions.");
   }
 
   return response.json();
@@ -314,8 +349,7 @@ export async function loadRemoteSetupCourses(setupId: string): Promise<CourseInp
   });
 
   if (!response.ok) {
-    const detail = await response.json().catch(() => null);
-    throw new Error(detail?.detail ?? "Failed to load courses from saved setup.");
+    throw await buildErrorFromResponse(response, "Failed to load courses from saved setup.");
   }
 
   return response.json();
@@ -329,8 +363,7 @@ export async function loadRemoteSetupFixedExams(setupId: string): Promise<FixedE
   });
 
   if (!response.ok) {
-    const detail = await response.json().catch(() => null);
-    throw new Error(detail?.detail ?? "Failed to load fixed exams from saved setup.");
+    throw await buildErrorFromResponse(response, "Failed to load fixed exams from saved setup.");
   }
 
   return response.json();
