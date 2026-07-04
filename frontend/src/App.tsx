@@ -55,7 +55,7 @@ import type {
 import { loadProject, saveProject } from "./storage/localProject";
 import { getExamMoveKey, getPreviewKey } from "./utils/examKeys";
 import type { PreviewResponse } from "./utils/workspaceUtils";
-import { formatDisplayDate } from "./utils/dateHelpers";
+import { formatDisplayDate, toDate } from "./utils/dateHelpers";
 import { cn } from "./lib/utils";
 import { Badge } from "./components/ui/badge";
 import { Button } from "./components/ui/button";
@@ -538,6 +538,11 @@ function App() {
     );
   }, [selectedScheduleExam, selectedScheduleSolution]);
 
+  const selectedMoedExams = useMemo(
+    () => selectedScheduleSolution?.exams.filter((exam) => exam.moed_number === selectedScheduleMoedNumber) ?? [],
+    [selectedScheduleMoedNumber, selectedScheduleSolution],
+  );
+
   const courseByCode = useMemo(() => {
     const map = Object.fromEntries(project.courses.map((course) => [course.course_code, course])) as Record<string, CourseInput>;
     if (Object.keys(map).length > 0) {
@@ -568,6 +573,40 @@ function App() {
     () => Object.fromEntries(Object.values(courseByCode).map((course) => [course.course_code, course.course_name])),
     [courseByCode],
   );
+
+  const scheduleDepartmentStats = useMemo(() => {
+    const stats = {
+      all: { exams: 0, friday: 0 },
+      sw: { exams: 0, friday: 0 },
+      is: { exams: 0, friday: 0 },
+    };
+
+    for (const exam of selectedMoedExams) {
+      const department = courseByCode[exam.course_code]?.department;
+      const isFriday = toDate(exam.exam_date).getDay() === 5;
+
+      stats.all.exams += 1;
+      if (isFriday) {
+        stats.all.friday += 1;
+      }
+
+      if (department === "SW") {
+        stats.sw.exams += 1;
+        if (isFriday) {
+          stats.sw.friday += 1;
+        }
+      }
+
+      if (department === "IS") {
+        stats.is.exams += 1;
+        if (isFriday) {
+          stats.is.friday += 1;
+        }
+      }
+    }
+
+    return stats;
+  }, [courseByCode, selectedMoedExams]);
 
   const scheduleSemesterRows = useMemo(
     () =>
@@ -611,6 +650,14 @@ function App() {
       );
     });
   }, [selectedScheduleMoedNumber, selectedScheduleMoedWindow, selectedScheduleSolution]);
+
+  const selectedScheduleConflictSummary = useMemo(
+    () => ({
+      high: selectedScheduleConflictIssues.filter((issue) => issue.severity === "error").length,
+      medium: selectedScheduleConflictIssues.filter((issue) => issue.severity === "warning").length,
+    }),
+    [selectedScheduleConflictIssues],
+  );
 
   useEffect(() => {
     if (project.solutions.length === 0) {
@@ -2042,20 +2089,16 @@ function App() {
 
           {activeRoute === "schedule" ? (
             <Card>
-              <CardHeader>
-                <CardTitle>Schedule Options</CardTitle>
-                <CardDescription>Review generated schedules and return to Setup anytime from the sidebar.</CardDescription>
-              </CardHeader>
-              <CardContent className="space-y-4">
+              <CardContent className="space-y-4 pt-4">
                 {project.solutions.length === 0 ? <FormMessage>No generated options yet. Click Generate Options to create schedules.</FormMessage> : null}
                 {selectedScheduleSolution ? (
-                  <div className="space-y-3 rounded-lg border border-slate-200 bg-white p-4">
+                  <div className="space-y-3">
                     <div className="flex flex-wrap items-center justify-between gap-3">
                       <div>
                         <p className="text-sm font-medium">Master Calendar</p>
                         <p className="text-xs text-slate-500">Restored calendar view for {selectedScheduleSolution.solution_id}</p>
                       </div>
-                      <div className="flex flex-wrap items-center gap-2">
+                      <div className="flex flex-wrap items-center justify-end gap-2">
                         <div className="solution-segmented-control" aria-label="Solution options">
                           {project.solutions.map((solution, index) => (
                             <button
@@ -2070,6 +2113,29 @@ function App() {
                               {`Sol ${index + 1}`}
                             </button>
                           ))}
+                        </div>
+                        <div className="solution-segmented-control" aria-label="Department filters">
+                          <button
+                            type="button"
+                            className={cn("solution-segment", scheduleDepartmentFilter === "all" ? "active" : "")}
+                            onClick={() => setScheduleDepartmentFilter("all")}
+                          >
+                            {`all(${scheduleDepartmentStats.all.friday})`}
+                          </button>
+                          <button
+                            type="button"
+                            className={cn("solution-segment", scheduleDepartmentFilter === "sw" ? "active" : "")}
+                            onClick={() => setScheduleDepartmentFilter("sw")}
+                          >
+                            {`sw(${scheduleDepartmentStats.sw.friday})`}
+                          </button>
+                          <button
+                            type="button"
+                            className={cn("solution-segment", scheduleDepartmentFilter === "is" ? "active" : "")}
+                            onClick={() => setScheduleDepartmentFilter("is")}
+                          >
+                            {`is(${scheduleDepartmentStats.is.friday})`}
+                          </button>
                         </div>
                         {project.moed_windows.map((window) => (
                           <Button
@@ -2102,6 +2168,10 @@ function App() {
                       onSelectExam={(exam) => {
                         setSelectedScheduleExamKey(getExamMoveKey(selectedScheduleSolution.solution_id, exam.course_code, exam.moed_number));
                         setSelectedSchedulePreviewDate(exam.exam_date);
+                      }}
+                      onClearSelectedExam={() => {
+                        setSelectedScheduleExamKey(null);
+                        setSelectedSchedulePreviewDate(null);
                       }}
                       onSelectPreviewDate={setSelectedSchedulePreviewDate}
                       onDepartmentFilterChange={setScheduleDepartmentFilter}
@@ -2149,14 +2219,22 @@ function App() {
               </>
             ) : (
               <>
-                <Button
-                  type="button"
-                  variant="secondary"
-                  disabled={busyAction !== null}
-                  onClick={() => setShowConflictDrawer((current) => !current)}
-                >
-                  {showConflictDrawer ? "Hide Conflicts" : "Conflicts"}
-                </Button>
+                <div className="conflict-action-wrap">
+                  {selectedScheduleConflictSummary.high + selectedScheduleConflictSummary.medium > 0 ? (
+                    <div className="conflict-mini-bubbles" aria-label={`High ${selectedScheduleConflictSummary.high}, Medium ${selectedScheduleConflictSummary.medium}`}>
+                      {selectedScheduleConflictSummary.medium > 0 ? <span className="conflict-mini-bubble medium">{selectedScheduleConflictSummary.medium}</span> : null}
+                      {selectedScheduleConflictSummary.high > 0 ? <span className="conflict-mini-bubble high">{selectedScheduleConflictSummary.high}</span> : null}
+                    </div>
+                  ) : null}
+                  <Button
+                    type="button"
+                    variant="secondary"
+                    disabled={busyAction !== null}
+                    onClick={() => setShowConflictDrawer((current) => !current)}
+                  >
+                    {showConflictDrawer ? "Hide Conflicts" : "Conflicts"}
+                  </Button>
+                </div>
                 <Button type="button" onClick={() => void handleSolve()} disabled={busyAction !== null}>
                   {busyAction === "solve" ? "Optimizing..." : "Optimize"}
                 </Button>

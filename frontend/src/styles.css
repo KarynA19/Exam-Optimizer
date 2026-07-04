@@ -57,6 +57,7 @@ button:not(:disabled):hover {
   border-radius: 0.75rem;
   background: #fff;
   text-align: left;
+  cursor: pointer;
 }
 
 .department-stat-card.active {
@@ -80,8 +81,11 @@ button:not(:disabled):hover {
 
 .calendar-board {
   display: grid;
-  overflow-x: auto;
-  border: 1px solid #cfd8e3;
+  overflow-x: scroll;
+  overflow-y: scroll;
+  max-height: min(680px, 72vh, calc(100vh - 230px));
+  scrollbar-gutter: stable both-edges;
+  border: 1px solid rgba(148, 163, 184, 0.35);
   border-radius: 0.75rem;
   background: #fff;
 }
@@ -90,17 +94,16 @@ button:not(:disabled):hover {
 .calendar-semester-heading,
 .calendar-date-rail,
 .calendar-slot {
-  min-height: 62px;
-  padding: 0.4rem;
-  border-right: 1px solid #e2e8f0;
-  border-bottom: 1px solid #e2e8f0;
+  min-height: 44px;
+  padding: 0.25rem 0.32rem;
+  border-right: 1px solid rgba(148, 163, 184, 0.26);
+  border-bottom: 1px solid rgba(148, 163, 184, 0.26);
 }
 
 .calendar-year-group,
-.calendar-semester-heading,
-.calendar-date-rail-header {
-  background: #f8fafc;
-  font-size: 0.8rem;
+.calendar-semester-heading {
+  font-size: 0.75rem;
+  min-height: 44px;
 }
 
 .calendar-year-group,
@@ -110,11 +113,59 @@ button:not(:disabled):hover {
   gap: 0.15rem;
 }
 
+.calendar-year-group {
+  background: #f1f5f9;
+}
+
+.calendar-year-group.year-group-boundary,
+.calendar-semester-heading.year-boundary,
+.calendar-slot.year-boundary {
+  border-right: 2px solid #cbd5e1;
+}
+
+.calendar-semester-heading {
+  position: sticky;
+  top: 0;
+  z-index: 22;
+  background: #eef2ff;
+  box-shadow: inset 0 -1px 0 rgba(148, 163, 184, 0.35);
+}
+
+.calendar-date-rail-header {
+  position: sticky;
+  top: 0;
+  z-index: 24;
+  background: #f8fafc;
+  font-size: 0.75rem;
+}
+
+.calendar-date-rail {
+  position: sticky;
+  right: 0;
+  z-index: 18;
+  background: #ffffff;
+}
+
+.calendar-date-rail.calendar-date-rail-header {
+  right: 0;
+  z-index: 26;
+}
+
+.calendar-slot,
+.calendar-date-rail {
+  min-height: 84px;
+}
+
+.calendar-date-rail.calendar-date-rail-header {
+  min-height: 44px;
+}
+
 .calendar-slot {
   display: grid;
   gap: 0.15rem;
   align-content: start;
   background: #fff;
+  overflow: hidden;
 }
 
 .calendar-slot.dimmed {
@@ -138,46 +189,144 @@ button:not(:disabled):hover {
 }
 
 .calendar-slot.blocked {
-  background: #f8fafc;
+  background-color: rgba(248, 250, 252, 0.65);
+  background-image: linear-gradient(
+    45deg,
+    rgba(226, 232, 240, 0.65) 25%,
+    transparent 25%,
+    transparent 50%,
+    rgba(226, 232, 240, 0.65) 50%,
+    rgba(226, 232, 240, 0.65) 75%,
+    transparent 75%,
+    transparent
+  );
+  background-size: 18px 18px;
 }
 
 .calendar-slot.excluded,
 .calendar-date-rail.excluded {
-  background: #fff7ed;
+  background-color: rgba(248, 250, 252, 0.65);
 }
 
-.calendar-blocked-note {
-  font-size: 0.68rem;
-  color: #9a3412;
+.calendar-date-rail > strong {
+  font-size: 0.72rem;
+  line-height: 1.25;
+  word-break: normal;
+  overflow-wrap: break-word;
+}
+
+.calendar-date-rail > span {
+  font-size: 0.66rem;
+  color: #475569;
 }
 
 .exam-chip {
   width: 100%;
+  max-width: 100%;
   display: grid;
-  gap: 0.1rem;
-  padding: 0.25rem 0.35rem;
-  border: 1px solid #dbe2ea;
-  border-radius: 0.5rem;
-  background: #f8fafc;
+  gap: 0.08rem;
+  padding: 0.35rem 0.45rem;
+  border: 1px solid #e2e8f0;
+  border-radius: 0.75rem;
+  background: #ffffff;
   text-align: left;
-  font-size: 0.72rem;
+  font-size: 0.7rem;
+  position: relative;
+  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.08);
 }
 
 .exam-chip.selected {
-  border-color: #334155;
+  border-color: #475569;
+  box-shadow: 0 0 0 1px rgba(71, 85, 105, 0.2), 0 3px 8px rgba(15, 23, 42, 0.12);
+}
+
+.exam-chip.conflict-focused {
+  border-color: #0f172a;
+  outline: 2px solid #0f172a;
+  outline-offset: 1px;
+  box-shadow: 0 0 0 2px rgba(15, 23, 42, 0.28), 0 4px 10px rgba(15, 23, 42, 0.14);
+}
+
+.exam-chip.fixed.conflict-focused {
+  border-color: #0f172a;
+  box-shadow: inset 0 0 0 1px rgba(15, 23, 42, 0.5), 0 0 0 2px rgba(15, 23, 42, 0.28), 0 4px 10px rgba(15, 23, 42, 0.14);
 }
 
 .exam-chip.fixed {
-  border-style: dashed;
-  box-shadow: inset 0 0 0 1px #f59e0b;
+  border-color: #6366f1;
+  box-shadow: inset 0 0 0 1px rgba(99, 102, 241, 0.26), 0 1px 2px rgba(15, 23, 42, 0.08);
+}
+
+.exam-chip-lock {
+  width: 1.18rem;
+  height: 1.18rem;
+  color: #475569;
+  background: #ffffff;
+  border: 1px solid #94a3b8;
+  border-radius: 999px;
+  padding: 0.2rem;
+  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.12);
+}
+
+.exam-chip-indicators {
+  position: absolute;
+  top: 0.28rem;
+  right: 0.28rem;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.24rem;
+}
+
+.calendar-conflict-dot {
+  width: 0.56rem;
+  height: 0.56rem;
+  border-radius: 999px;
+  border: 1px solid transparent;
+  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.9);
+}
+
+.calendar-conflict-dot.severity-error {
+  background: #ef4444;
+  border-color: #b91c1c;
+}
+
+.calendar-conflict-dot.severity-warning {
+  background: #f59e0b;
+  border-color: #b45309;
 }
 
 .exam-chip.changed {
-  outline: 1px solid #f59e0b;
+  border-color: #f59e0b;
+  background: #fffbeb;
 }
 
 .exam-chip.filtered-out {
-  opacity: 0.38;
+  opacity: 0.28;
+}
+
+.exam-chip-title-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.35rem;
+}
+
+.exam-chip-code {
+  font-size: 0.78rem;
+  letter-spacing: 0.01em;
+  color: #0f172a;
+}
+
+.exam-chip-name {
+  margin: 0;
+  color: #64748b;
+  font-size: 0.67rem;
+  font-weight: 500;
+  overflow-wrap: anywhere;
+}
+
+.calendar-event-stack {
+  min-width: 0;
 }
 
 .exam-chip-meta {
@@ -185,7 +334,7 @@ button:not(:disabled):hover {
   align-items: center;
   gap: 0.3rem;
   flex-wrap: wrap;
-  font-size: 0.65rem;
+  font-size: 0.58rem;
   color: #64748b;
 }
 
@@ -314,6 +463,45 @@ button:not(:disabled):hover {
   overflow: auto;
 }
 
+.conflict-action-wrap {
+  position: relative;
+  display: inline-flex;
+}
+
+.conflict-mini-bubbles {
+  position: absolute;
+  right: 0;
+  bottom: calc(100% + 0.2rem);
+  display: inline-flex;
+  align-items: center;
+  gap: 0.22rem;
+  pointer-events: none;
+}
+
+.conflict-mini-bubble {
+  width: 1.35rem;
+  height: 1.35rem;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 999px;
+  font-size: 0.72rem;
+  font-weight: 700;
+  line-height: 1;
+  background: #ffffff;
+  box-shadow: 0 2px 7px rgba(15, 23, 42, 0.18);
+}
+
+.conflict-mini-bubble.high {
+  border: 2px solid #ef4444;
+  color: #b91c1c;
+}
+
+.conflict-mini-bubble.medium {
+  border: 2px solid #f59e0b;
+  color: #b45309;
+}
+
 .conflict-bubble-toggle {
   border: 1px solid #cbd5e1;
   border-radius: 0.5rem;
@@ -365,6 +553,30 @@ button:not(:disabled):hover {
   display: inline-flex;
   align-items: center;
   gap: 0.35rem;
+}
+
+.conflict-groups {
+  display: grid;
+  gap: 0.7rem;
+}
+
+.conflict-group {
+  display: grid;
+  gap: 0.35rem;
+}
+
+.conflict-group > h4 {
+  margin: 0;
+  font-size: 0.78rem;
+  color: #334155;
+}
+
+.conflict-group > h4.severity-error {
+  color: #b91c1c;
+}
+
+.conflict-group > h4.severity-warning {
+  color: #b45309;
 }
 
 .conflict-dot {
@@ -433,7 +645,9 @@ button:not(:disabled):hover {
   border: 1px solid #e2e8f0;
   background: #fff;
   border-radius: 0.5rem;
-  padding: 0.45rem 0.55rem;
+  padding: 0.35rem 0.45rem;
+  font-size: 0.93rem;
+  line-height: 1.3;
 }
 
 .conflict-item.active {
@@ -454,7 +668,12 @@ button:not(:disabled):hover {
   display: flex;
   justify-content: space-between;
   gap: 0.5rem;
-  margin-bottom: 0.15rem;
+  margin-bottom: 0.08rem;
+}
+
+.conflict-item > p {
+  margin: 0;
+  font-size: 0.88rem;
 }
 
 .drawer-actions {

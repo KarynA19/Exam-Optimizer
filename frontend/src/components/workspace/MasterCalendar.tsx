@@ -1,8 +1,9 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { Lock } from "lucide-react";
 
 import type { CourseInput, FixedExam, ScheduleProject, ScheduleSolution, ScheduledExam, ValidationIssue } from "../../types";
 import { getDepartmentClassName, getDepartmentLabel, getDepartmentShortLabel } from "../../utils/departmentUtils";
-import { diffDays, formatCalendarLabel, formatDisplayDate, toDate } from "../../utils/dateHelpers";
+import { diffDays, formatDisplayDate, toDate } from "../../utils/dateHelpers";
 import { getPreviewKey, hasExamChanged } from "../../utils/examKeys";
 import { getExcludedDateReason } from "../../utils/calendarUtils";
 import { getPreviewStatus, type PreviewResponse } from "../../utils/workspaceUtils";
@@ -30,6 +31,7 @@ export function MasterCalendar({
   departmentFilter,
   activeConflict,
   onSelectExam,
+  onClearSelectedExam,
   onSelectPreviewDate,
   onDropExam,
   onDepartmentFilterChange,
@@ -55,6 +57,7 @@ export function MasterCalendar({
   departmentFilter: "all" | "sw" | "is";
   activeConflict: ValidationIssue | null;
   onSelectExam: (exam: ScheduledExam) => void;
+  onClearSelectedExam: () => void;
   onSelectPreviewDate: (date: string) => void;
   onDropExam: (exam: ScheduledExam, targetDate: string, semesterNumber: number) => void;
   onDepartmentFilterChange: (filter: "all" | "sw" | "is") => void;
@@ -68,11 +71,39 @@ export function MasterCalendar({
   const examRefs = useRef<Record<string, HTMLButtonElement | null>>({});
   const [contextMenu, setContextMenu] = useState<{ exam: ScheduledExam; x: number; y: number } | null>(null);
   const visibleExams = solution.exams.filter((exam) => exam.moed_number === selectedMoedNumber);
+  const issueByExamKey = useMemo(() => {
+    const severityRank = { warning: 1, error: 2 } as const;
+    const issueMap = new Map<string, ValidationIssue>();
+
+    for (const issue of solution.issues) {
+      if (!issue.related_course_code || !issue.related_date) {
+        continue;
+      }
+
+      const match = visibleExams.find(
+        (exam) => exam.course_code === issue.related_course_code && exam.exam_date === issue.related_date,
+      );
+      if (!match) {
+        continue;
+      }
+
+      const issueKey = `${match.course_code}|${match.moed_number}|${match.exam_date}`;
+      const existingIssue = issueMap.get(issueKey);
+      if (!existingIssue || severityRank[issue.severity] > severityRank[existingIssue.severity]) {
+        issueMap.set(issueKey, issue);
+      }
+    }
+
+    return issueMap;
+  }, [solution.issues, visibleExams]);
   const semesterSet = new Set(semesterRows);
   const yearGroups = YEAR_GROUPS.map((group) => ({
     ...group,
     semesters: group.semesters.filter((semester) => semesterSet.has(semester)),
   })).filter((group) => group.semesters.length > 0);
+  const yearBoundarySemesters = new Set(
+    yearGroups.slice(0, -1).map((group) => group.semesters[group.semesters.length - 1]),
+  );
   const courseCountBySemester = new Map(
     semesterRows.map((semesterNumber) => [
       semesterNumber,
@@ -108,6 +139,32 @@ export function MasterCalendar({
     return project.moed_windows.find((window) => window.start_date <= dateText && dateText <= window.end_date) ?? null;
   }
 
+  const rowMinHeightByDate = useMemo(() => {
+    const courseSemesterMap = new Map(Object.values(courseByCode).map((course) => [course.course_code, course.semester_number]));
+    const fixedSemesterMap = new Map(project.fixed_exams.map((fixedExam) => [fixedExam.course_code, fixedExam.semester_number]));
+    const countByDateSemester = new Map<string, number>();
+
+    for (const exam of visibleExams) {
+      const semesterNumber = fixedSemesterMap.get(exam.course_code) ?? courseSemesterMap.get(exam.course_code);
+      if (!semesterNumber) {
+        continue;
+      }
+      const dateSemesterKey = `${exam.exam_date}|${semesterNumber}`;
+      countByDateSemester.set(dateSemesterKey, (countByDateSemester.get(dateSemesterKey) ?? 0) + 1);
+    }
+
+    const minHeightMap = new Map<string, number>();
+    for (const dateText of calendarDays) {
+      let maxInRow = 1;
+      for (const semesterNumber of semesterRows) {
+        maxInRow = Math.max(maxInRow, countByDateSemester.get(`${dateText}|${semesterNumber}`) ?? 0);
+      }
+      minHeightMap.set(dateText, 84 + Math.max(0, maxInRow - 1) * 70);
+    }
+
+    return minHeightMap;
+  }, [calendarDays, courseByCode, project.fixed_exams, semesterRows, visibleExams]);
+
   useEffect(() => {
     if (!activeConflictCourseCode || !activeConflictDate) {
       return;
@@ -135,31 +192,68 @@ export function MasterCalendar({
     };
   }, [contextMenu]);
 
+  useEffect(() => {
+    if (!selectedExam) {
+      return;
+    }
+
+    const handleOutsideExamClick = (event: MouseEvent) => {
+      const target = event.target;
+      if (!(target instanceof Element)) {
+        return;
+      }
+
+      if (target.closest(".exam-chip") || target.closest(".calendar-context-menu")) {
+        return;
+      }
+
+      onClearSelectedExam();
+    };
+
+    document.addEventListener("click", handleOutsideExamClick);
+    return () => {
+      document.removeEventListener("click", handleOutsideExamClick);
+    };
+  }, [onClearSelectedExam, selectedExam]);
+
   return (
     <div className="calendar-visual-stack">
       <div
         className="calendar-board calendar-board-timetable"
-        style={{ gridTemplateColumns: `repeat(${semesterRows.length}, minmax(108px, 1fr)) 86px` }}
+        style={{ gridTemplateColumns: `repeat(${semesterRows.length}, minmax(108px, 1fr)) 132px` }}
       >
-      {yearGroups.map((group) => (
+      {yearGroups.map((group, index) => (
         <div
           key={group.label}
-          className="calendar-year-group"
-          style={{ gridColumn: `span ${group.semesters.length}` }}
+          className={[
+            "calendar-year-group",
+            index < yearGroups.length - 1 ? "year-group-boundary" : "",
+          ].filter(Boolean).join(" ")}
+          style={{ gridColumn: `span ${group.semesters.length}`, gridRow: 1 }}
         >
           <strong>{group.label}</strong>
-          <span>
-            Semesters {group.semesters[0]}-{group.semesters[group.semesters.length - 1]}
-          </span>
         </div>
       ))}
-      <div className="calendar-date-rail calendar-date-rail-header" style={{ gridRow: "span 2" }}>
+      <div
+        className="calendar-year-group calendar-date-corner"
+        style={{ gridColumn: `${semesterRows.length + 1}`, gridRow: 1 }}
+      />
+      <div
+        className="calendar-date-rail calendar-date-rail-header"
+        style={{ gridColumn: `${semesterRows.length + 1}`, gridRow: 2 }}
+      >
         <strong>Date</strong>
-        <span>Moed windows</span>
       </div>
 
       {semesterRows.map((semesterNumber) => (
-        <div key={`label-${semesterNumber}`} className="calendar-semester-heading">
+        <div
+          key={`label-${semesterNumber}`}
+          className={[
+            "calendar-semester-heading",
+            yearBoundarySemesters.has(semesterNumber) ? "year-boundary" : "",
+          ].filter(Boolean).join(" ")}
+          style={{ gridRow: 2 }}
+        >
           <strong>Semester {semesterNumber}</strong>
           <span>{courseCountBySemester.get(semesterNumber) ?? 0} courses</span>
         </div>
@@ -172,8 +266,8 @@ export function MasterCalendar({
         const isExcluded = excludedReason !== null;
         const weekdayLabel = date.toLocaleDateString(undefined, { weekday: "short" });
         const moedWindow = getMoedWindowForDate(dateText);
-        const moedLabel = moedWindow ? `Moed ${String.fromCharCode(64 + moedWindow.moed_number)}` : "Moed";
         const moedDay = moedWindow ? diffDays(moedWindow.start_date, dateText) + 1 : 1;
+        const monthDayLabel = date.toLocaleDateString(undefined, { month: "long", day: "numeric" });
 
         const dayCells = semesterRows.map((semesterNumber) => {
           const rowExams = visibleExams.filter(
@@ -189,6 +283,7 @@ export function MasterCalendar({
           const canPreview = selectedSemester && !isSaturday && !isExcluded;
           const cellClassName = [
             "calendar-slot",
+            yearBoundarySemesters.has(semesterNumber) ? "year-boundary" : "",
             selectedExam && !inFocusWindow ? "dimmed" : "",
             canPreview ? `preview-${cellPreviewStatus}` : "",
             canPreview && selectedPreviewDate === dateText ? "preview-target" : "",
@@ -202,6 +297,8 @@ export function MasterCalendar({
             <div
               key={`${semesterNumber}-${dateText}`}
               className={cellClassName}
+              style={{ minHeight: `${rowMinHeightByDate.get(dateText) ?? 84}px` }}
+              title={isSaturday ? "Unavailable" : excludedReason ?? undefined}
               onClick={() => {
                 if (!interactionsEnabled) {
                   return;
@@ -232,20 +329,21 @@ export function MasterCalendar({
               }}
             >
               {canPreview && previewLoading ? <span className="preview-pulse" /> : null}
-              {isSaturday || isExcluded ? <span className="calendar-blocked-note">{isExcluded ? `Unavailable: ${excludedReason}` : "Unavailable"}</span> : null}
               {rowExams.map((exam) => {
+                const examIssue = issueByExamKey.get(`${exam.course_code}|${exam.moed_number}|${exam.exam_date}`);
                 const selected = selectedExam?.course_code === exam.course_code && selectedExam.moed_number === exam.moed_number;
+                const conflictFocused = Boolean(
+                  activeConflict?.related_course_code
+                  && activeConflict?.related_date
+                  && activeConflict.related_course_code === exam.course_code
+                  && activeConflict.related_date === exam.exam_date,
+                );
                 const changed = showChanges && hasExamChanged(solution, exam.course_code, exam.moed_number);
+                const locked = isExamLocked(exam);
+                const constrained = locked;
                 const course = courseByCode[exam.course_code];
+                const courseName = courseNameByCode[exam.course_code] ?? exam.course_code;
                 const departmentMatchesFilter = matchesDepartmentFilter(course, departmentFilter);
-                const matchesConflictCourse = activeConflict?.related_course_code
-                  ? activeConflict.related_course_code === exam.course_code
-                  : selectedExam?.course_code === exam.course_code;
-                const matchesConflictDate = activeConflict?.related_date
-                  ? activeConflict.related_date === exam.exam_date
-                  : selectedExam?.exam_date === exam.exam_date;
-                const showConflictNote = Boolean(activeConflict && matchesConflictCourse && matchesConflictDate);
-                const examSemesterNumber = getExamSemester(exam) ?? semesterNumber;
 
                 return (
                   <div key={`${exam.course_code}-${exam.moed_number}-${exam.exam_date}`} className="calendar-event-stack">
@@ -258,8 +356,9 @@ export function MasterCalendar({
                         "exam-chip",
                         getDepartmentClassName(course),
                         selected ? "selected" : "",
+                        conflictFocused ? "conflict-focused" : "",
                         changed ? "changed" : "",
-                        exam.source === "fixed" || isExamLocked(exam) ? "fixed" : "",
+                        constrained ? "fixed" : "",
                         departmentFilter !== "all" && !departmentMatchesFilter ? "filtered-out" : "",
                       ].filter(Boolean).join(" ")}
                       onClick={(event) => {
@@ -274,7 +373,11 @@ export function MasterCalendar({
                           return;
                         }
                         event.stopPropagation();
-                        onExamDoubleClick(exam);
+                        if (locked) {
+                          onExamUnlock(exam);
+                          return;
+                        }
+                        onExamLock(exam);
                       }}
                       onContextMenu={(event) => {
                         if (!interactionsEnabled) {
@@ -294,18 +397,24 @@ export function MasterCalendar({
                       }}
                       title={getDepartmentLabel(course)}
                     >
-                      <strong>{`${exam.course_code} - ${courseNameByCode[exam.course_code] ?? exam.course_code}`}</strong>
+                      <span className="exam-chip-indicators">
+                        {constrained ? <Lock className="exam-chip-lock" aria-hidden="true" /> : null}
+                        {examIssue ? (
+                          <span
+                            className={examIssue.severity === "error" ? "calendar-conflict-dot severity-error" : "calendar-conflict-dot severity-warning"}
+                            title={examIssue.message}
+                            aria-label={examIssue.message}
+                          />
+                        ) : null}
+                      </span>
+                      <div className="exam-chip-title-row">
+                        <strong className="exam-chip-code">{exam.course_code}</strong>
+                      </div>
+                      <p className="exam-chip-name">{courseName}</p>
                       <span className="exam-chip-meta">
                         <span className={["department-badge", getDepartmentClassName(course)].join(" ")}>{getDepartmentShortLabel(course)}</span>
-                        <span>Semester {examSemesterNumber}</span>
-                        {exam.source === "fixed" ? <span className="source-chip">Fixed</span> : null}
                       </span>
                     </button>
-                    {showConflictNote ? (
-                      <div className={activeConflict?.severity === "error" ? "calendar-conflict-note severity-error" : "calendar-conflict-note severity-warning"}>
-                        {activeConflict?.message}
-                      </div>
-                    ) : null}
                   </div>
                 );
               })}
@@ -343,10 +452,12 @@ export function MasterCalendar({
 
         return [
           ...dayCells,
-          <div key={dateText} className={isSaturday || isExcluded ? "calendar-date-rail blocked excluded" : "calendar-date-rail"}>
-            <strong>{formatCalendarLabel(dateText)}</strong>
-            <span>{weekdayLabel}</span>
-            <span>{moedLabel} Day {moedDay}</span>
+          <div
+            key={dateText}
+            className={isSaturday || isExcluded ? "calendar-date-rail blocked excluded" : "calendar-date-rail"}
+            style={{ minHeight: `${rowMinHeightByDate.get(dateText) ?? 84}px` }}
+          >
+            <strong>{`${weekdayLabel}, ${monthDayLabel} - Day ${moedDay}`}</strong>
           </div>,
         ];
       })}
@@ -368,11 +479,14 @@ export function MasterCalendar({
 
 
 function matchesDepartmentFilter(course: CourseInput | undefined, filter: "all" | "sw" | "is"): boolean {
-  if (filter === "all" || !course?.department) {
+  if (filter === "all") {
     return true;
   }
-  if (filter === "sw") {
-    return course.department !== "IS";
+  if (!course?.department) {
+    return false;
   }
-  return course.department !== "SW";
+  if (filter === "sw") {
+    return course.department === "SW";
+  }
+  return course.department === "IS";
 }
