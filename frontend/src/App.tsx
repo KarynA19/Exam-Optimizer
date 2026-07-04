@@ -21,6 +21,7 @@ import {
 } from "lucide-react";
 
 import {
+  clearStoredAuth,
   deleteRemoteSetup,
   downloadCourseTemplate,
   explainMoveProject,
@@ -954,6 +955,18 @@ function App() {
     }
   }
 
+  async function handleAuthButtonClick() {
+    if (authUserId || getStoredAuthToken()) {
+      clearStoredAuth();
+      setAuthUserId(null);
+      setRemoteSavedSetups([]);
+      setActionStatus("Logged out.");
+      return;
+    }
+
+    await handleLogin();
+  }
+
   async function refreshRemoteSavedSetups() {
     try {
       const setups = await listRemoteSavedSetups();
@@ -1515,7 +1528,7 @@ function App() {
         <div className="mx-auto flex w-full max-w-[1600px] flex-col gap-4 p-6 pb-36">
           <div className="flex justify-end gap-2">
             <Button type="button" variant="outline" onClick={() => void refreshRemoteSavedSetups()}>Refresh Saved Setups</Button>
-            <Button type="button" variant="outline" onClick={() => void handleLogin()}>
+            <Button type="button" variant="outline" onClick={() => void handleAuthButtonClick()}>
               {authUserId ? `Logged in: ${authUserId}` : "Login"}
             </Button>
           </div>
