@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { format } from "date-fns";
 import type { DateRange } from "react-day-picker";
 import type { ColumnDef } from "@tanstack/react-table";
+import * as XLSX from "xlsx";
 import {
   ArrowUpDown,
   BookOpen,
@@ -100,6 +101,11 @@ type FixedDraft = {
   exam_date: string;
   department: CourseDepartment;
   prerequisite_course_codes: string[];
+};
+
+type ScheduleCourseEditorState = {
+  draft: CourseDraft;
+  editingCourseIndex: number | null;
 };
 
 function prettifyPath(path: string): string {
@@ -429,6 +435,7 @@ function App() {
   const [selectedScheduleExamKey, setSelectedScheduleExamKey] = useState<string | null>(null);
   const [selectedSchedulePreviewDate, setSelectedSchedulePreviewDate] = useState<string | null>(null);
   const [scheduleDepartmentFilter, setScheduleDepartmentFilter] = useState<"all" | "sw" | "is">("all");
+  const [scheduleExamSearchQuery, setScheduleExamSearchQuery] = useState("");
   const [excludedDraftRange, setExcludedDraftRange] = useState<DateRange | undefined>();
   const [excludedReason, setExcludedReason] = useState("");
   const [fixedDraft, setFixedDraft] = useState<FixedDraft>({
@@ -455,6 +462,8 @@ function App() {
   const [activeConflict, setActiveConflict] = useState<ValidationIssue | null>(null);
   const [authUserId, setAuthUserId] = useState<string | null>(() => getStoredAuthUserId());
   const [remoteSavedSetups, setRemoteSavedSetups] = useState<RemoteSavedSetupSummary[]>([]);
+  const [solutionLocksBySolutionId, setSolutionLocksBySolutionId] = useState<Record<string, string[]>>({});
+  const [scheduleCourseEditor, setScheduleCourseEditor] = useState<ScheduleCourseEditorState | null>(null);
 
   const isSolveInProgress = busyAction === "solve";
 
@@ -519,6 +528,10 @@ function App() {
     () => project.solutions.find((solution) => solution.solution_id === selectedScheduleSolutionId) ?? project.solutions[0] ?? null,
     [project.solutions, selectedScheduleSolutionId],
   );
+
+  function getSolutionLockKey(exam: { course_code: string; moed_number: number }): string {
+    return `${exam.course_code}|${exam.moed_number}`;
+  }
   const selectedScheduleExam = useMemo(
     () =>
       selectedScheduleSolution && selectedScheduleExamKey
@@ -672,6 +685,13 @@ function App() {
       setSelectedScheduleSolutionId(project.solutions[0].solution_id);
     }
   }, [project.solutions, selectedScheduleSolutionId]);
+
+  useEffect(() => {
+    const activeSolutionIds = new Set(project.solutions.map((solution) => solution.solution_id));
+    setSolutionLocksBySolutionId((current) =>
+      Object.fromEntries(Object.entries(current).filter(([solutionId]) => activeSolutionIds.has(solutionId))),
+    );
+  }, [project.solutions]);
 
   useEffect(() => {
     if (selectedScheduleExam && selectedScheduleExam.moed_number !== selectedScheduleMoedNumber) {
@@ -999,6 +1019,8 @@ function App() {
         ...payload.project,
         remote_setup_id: payload.metadata.setup_id,
       });
+      setSolutionLocksBySolutionId({});
+      setScheduleCourseEditor(null);
       setActiveRoute("setup");
       setActiveStep("setup");
       setActionStatus(`Loaded '${payload.metadata.project_name}' from database.`);
@@ -1154,7 +1176,38 @@ function App() {
       await refreshRemoteSavedSetups();
       setActionStatus("Saved solution updates to database.");
     } catch (error) {
-      setActionStatus(formatApiErrorMessage(error, "Failed to save solution updates."));
+      const apiMessage = formatApiErrorMessage(error, "Failed to save solution updates.");
+      if (/saved setup not found/i.test(apiMessage)) {
+        try {
+          const setups = await listRemoteSavedSetups();
+          const setupYear = Number(project.moed_windows[0]?.start_date?.slice(0, 4));
+          const nameMatched = setups.filter(
+            (setup) =>
+              setup.project_name.trim().toLowerCase() === project.project_name.trim().toLowerCase()
+              && (!Number.isFinite(setupYear) || setup.year === setupYear),
+          );
+          const fallbackSetup = nameMatched[0] ?? (setups.length === 1 ? setups[0] : null);
+
+          if (fallbackSetup) {
+            await updateRemoteSetupSolutions(fallbackSetup.setup_id, project.solutions, selectedScheduleSolutionId);
+            setProject((current) => ({ ...current, remote_setup_id: fallbackSetup.setup_id }));
+            await refreshRemoteSavedSetups();
+            setActionStatus(`Linked to existing setup '${fallbackSetup.project_name}' and saved solution updates.`);
+            return;
+          }
+
+          const saved = await saveRemoteSetup(project, project.remote_setup_id, selectedScheduleSolutionId);
+          setProject((current) => ({ ...current, remote_setup_id: saved.setup_id }));
+          await refreshRemoteSavedSetups();
+          setActionStatus("Saved setup was missing remotely. Recreated it and saved solution updates.");
+          return;
+        } catch (fallbackError) {
+          setActionStatus(formatApiErrorMessage(fallbackError, "Failed to recreate setup while saving solution updates."));
+          return;
+        }
+      }
+
+      setActionStatus(apiMessage);
     }
   }
 
@@ -1223,6 +1276,16 @@ function App() {
       return;
     }
 
+    if (isExamFixed(exam)) {
+      setActionStatus(`${exam.course_code} is a fixed exam and cannot be moved.`);
+      return;
+    }
+
+    if (isExamLocked(exam)) {
+      setActionStatus(`${exam.course_code} is locked for this solution.`);
+      return;
+    }
+
     setBusyAction("manual-move");
     setActionStatus(`Moving ${exam.course_code} to ${formatDisplayDate(nextDate)}...`);
 
@@ -1265,65 +1328,88 @@ function App() {
     const fallback = courseByCode[exam.course_code];
 
     if (index >= 0) {
-      setEditingCourseIndex(index);
-      setCourseDraft({ ...project.courses[index] });
+      setScheduleCourseEditor({
+        editingCourseIndex: index,
+        draft: { ...project.courses[index] },
+      });
     } else {
-      setEditingCourseIndex(null);
-      setCourseDraft({
-        course_code: exam.course_code,
-        course_name: fallback?.course_name ?? exam.course_code,
-        semester_number: fallback?.semester_number ?? 1,
-        high_failure_rate: fallback?.high_failure_rate ?? false,
-        department: fallback?.department ?? null,
-        prerequisite_course_codes: fallback?.prerequisite_course_codes ?? [],
+      setScheduleCourseEditor({
+        editingCourseIndex: null,
+        draft: {
+          course_code: exam.course_code,
+          course_name: fallback?.course_name ?? exam.course_code,
+          semester_number: fallback?.semester_number ?? 1,
+          high_failure_rate: fallback?.high_failure_rate ?? false,
+          department: fallback?.department ?? null,
+          prerequisite_course_codes: fallback?.prerequisite_course_codes ?? [],
+        },
       });
     }
 
-    setActiveRoute("setup");
-    setActiveStep("courses");
     setSetupStatus(`Editing course ${exam.course_code}.`);
   }
 
-  function lockExamFromCalendar(exam: { course_code: string; exam_date: string }) {
+  function lockExamFromCalendar(exam: { course_code: string; moed_number: number; exam_date: string }) {
     if (isSolveInProgress) {
       return;
     }
 
-    const course = courseByCode[exam.course_code];
-    const lockedExam: FixedExam = {
-      course_code: exam.course_code,
-      course_name: course?.course_name ?? exam.course_code,
-      semester_number:
-        project.fixed_exams.find((fixedExam) => fixedExam.course_code === exam.course_code)?.semester_number
-        ?? course?.semester_number
-        ?? inferSemesterFromCourseCode(exam.course_code),
-      exam_date: exam.exam_date,
-      locked: true,
-      department: course?.department ?? null,
-      prerequisite_course_codes: course?.prerequisite_course_codes ?? [],
-    };
+    if (!selectedScheduleSolution) {
+      return;
+    }
 
-    setProject((current) => ({
-      ...current,
-      fixed_exams: [...current.fixed_exams.filter((fixedExam) => fixedExam.course_code !== exam.course_code), lockedExam],
-    }));
-    setActionStatus(`Locked ${exam.course_code} on ${formatDisplayDate(exam.exam_date)}.`);
+    const lockKey = getSolutionLockKey(exam);
+    setSolutionLocksBySolutionId((current) => {
+      const existing = current[selectedScheduleSolution.solution_id] ?? [];
+      if (existing.includes(lockKey)) {
+        return current;
+      }
+
+      return {
+        ...current,
+        [selectedScheduleSolution.solution_id]: [...existing, lockKey],
+      };
+    });
+    setActionStatus(`Locked ${exam.course_code} on ${formatDisplayDate(exam.exam_date)} for ${selectedScheduleSolution.solution_id}.`);
   }
 
-  function unlockExamFromCalendar(exam: { course_code: string }) {
+  function unlockExamFromCalendar(exam: { course_code: string; moed_number: number; exam_date: string }) {
     if (isSolveInProgress) {
       return;
     }
 
-    setProject((current) => ({
-      ...current,
-      fixed_exams: current.fixed_exams.filter((fixedExam) => fixedExam.course_code !== exam.course_code),
-    }));
-    setActionStatus(`Unlocked ${exam.course_code}.`);
+    if (!selectedScheduleSolution) {
+      return;
+    }
+
+    const lockKey = getSolutionLockKey(exam);
+    setSolutionLocksBySolutionId((current) => {
+      const existing = current[selectedScheduleSolution.solution_id] ?? [];
+      if (!existing.includes(lockKey)) {
+        return current;
+      }
+
+      return {
+        ...current,
+        [selectedScheduleSolution.solution_id]: existing.filter((entry) => entry !== lockKey),
+      };
+    });
+
+    setActionStatus(`Unlocked ${exam.course_code} for ${selectedScheduleSolution.solution_id}.`);
   }
 
   function editExamDateFromCalendar(exam: { course_code: string; moed_number: number; exam_date: string }) {
     if (isSolveInProgress) {
+      return;
+    }
+
+    if (isExamFixed(exam)) {
+      setActionStatus(`${exam.course_code} is a fixed exam and cannot be edited.`);
+      return;
+    }
+
+    if (isExamLocked(exam)) {
+      setActionStatus(`${exam.course_code} is locked for this solution.`);
       return;
     }
 
@@ -1343,8 +1429,95 @@ function App() {
     void handleManualMove(exam, normalized);
   }
 
-  function isExamLocked(exam: { course_code: string; exam_date: string }) {
-    return project.fixed_exams.some((fixedExam) => fixedExam.course_code === exam.course_code && fixedExam.exam_date === exam.exam_date);
+  function isExamLocked(exam: { course_code: string; moed_number: number; exam_date: string }) {
+    if (!selectedScheduleSolution) {
+      return false;
+    }
+
+    const lockKey = getSolutionLockKey(exam);
+    return (solutionLocksBySolutionId[selectedScheduleSolution.solution_id] ?? []).includes(lockKey);
+  }
+
+  function isExamFixed(exam: { course_code: string; exam_date: string; source?: string }) {
+    if (exam.source === "fixed") {
+      return true;
+    }
+
+    return project.fixed_exams.some(
+      (fixedExam) => fixedExam.course_code === exam.course_code && fixedExam.exam_date === exam.exam_date,
+    );
+  }
+
+  function handleExportSelectedSolution() {
+    if (!selectedScheduleSolution) {
+      setActionStatus("Select a solution to export.");
+      return;
+    }
+
+    const fixedExamByCourseCode = new Map(project.fixed_exams.map((fixedExam) => [fixedExam.course_code, fixedExam]));
+    const workbook = XLSX.utils.book_new();
+    const moedNumbers = project.moed_windows.map((window) => window.moed_number).sort((left, right) => left - right);
+
+    for (const moedNumber of moedNumbers) {
+      const rows = selectedScheduleSolution.exams
+        .filter((exam) => exam.moed_number === moedNumber)
+        .sort((left, right) => left.exam_date.localeCompare(right.exam_date) || left.course_code.localeCompare(right.course_code))
+        .map((exam) => {
+          const course = courseByCode[exam.course_code];
+          const fixedExam = fixedExamByCourseCode.get(exam.course_code);
+          const semesterNumber = course?.semester_number ?? fixedExam?.semester_number ?? inferSemesterFromCourseCode(exam.course_code);
+          const department = course?.department ?? fixedExam?.department ?? null;
+
+          return {
+            "exam date": formatDisplayDate(exam.exam_date),
+            "course code": exam.course_code,
+            "course name": course?.course_name ?? fixedExam?.course_name ?? exam.course_code,
+            semester: semesterNumber,
+            department: department ?? "ALL",
+            "fixed/not fixed": isExamFixed(exam) ? "fixed" : "not fixed",
+          };
+        });
+
+      const sheet = XLSX.utils.json_to_sheet(rows);
+      const sheetName = `Moed ${String.fromCharCode(64 + moedNumber)}`;
+      XLSX.utils.book_append_sheet(workbook, sheet, sheetName);
+    }
+
+    const projectName = project.project_name.trim().replace(/[^a-z0-9-_]+/gi, "_") || "schedule";
+    XLSX.writeFile(workbook, `${projectName}_${selectedScheduleSolution.solution_id}.xlsx`);
+    setActionStatus(`Exported ${selectedScheduleSolution.solution_id} to Excel.`);
+  }
+
+  function saveScheduleCourseEditor() {
+    if (!scheduleCourseEditor) {
+      return;
+    }
+
+    const nextDraft = scheduleCourseEditor.draft;
+    if (!nextDraft.course_code.trim() || !nextDraft.course_name.trim()) {
+      setActionStatus("Course code and course name are required.");
+      return;
+    }
+
+    if (scheduleCourseEditor.editingCourseIndex === null) {
+      patchProject({
+        courses: [
+          ...project.courses,
+          { ...nextDraft, course_code: nextDraft.course_code.trim(), course_name: nextDraft.course_name.trim() },
+        ],
+      });
+    } else {
+      patchProject({
+        courses: project.courses.map((course, index) =>
+          index === scheduleCourseEditor.editingCourseIndex
+            ? { ...nextDraft, course_code: nextDraft.course_code.trim(), course_name: nextDraft.course_name.trim() }
+            : course,
+        ),
+      });
+    }
+
+    setScheduleCourseEditor(null);
+    setActionStatus("Course details updated from calendar.");
   }
 
   async function handleCourseImport(file: File) {
@@ -1493,8 +1666,11 @@ function App() {
     setSelectedScheduleMoedNumber(1);
     setSelectedScheduleExamKey(null);
     setSelectedSchedulePreviewDate(null);
+    setScheduleExamSearchQuery("");
     setSchedulePreviewResponses({});
     setActiveConflict(null);
+    setSolutionLocksBySolutionId({});
+    setScheduleCourseEditor(null);
 
     setSetupStatus("Started a new setup draft.");
     setActionStatus("New setup created.");
@@ -2112,6 +2288,24 @@ function App() {
                         <p className="text-xs text-slate-500">Restored calendar view for {selectedScheduleSolution.solution_id}</p>
                       </div>
                       <div className="flex flex-wrap items-center justify-end gap-2">
+                        <div className="flex items-center gap-2 rounded-full border border-slate-300 bg-white px-3 py-1.5">
+                          <Input
+                            value={scheduleExamSearchQuery}
+                            onChange={(event) => setScheduleExamSearchQuery(event.target.value)}
+                            placeholder="Search exam: code or name"
+                            className="h-7 w-48 border-0 bg-transparent p-0 text-xs shadow-none focus-visible:ring-0"
+                          />
+                          {scheduleExamSearchQuery.trim().length > 0 ? (
+                            <button
+                              type="button"
+                              className="text-xs text-slate-500 hover:text-slate-800"
+                              onClick={() => setScheduleExamSearchQuery("")}
+                              aria-label="Clear exam search"
+                            >
+                              Clear
+                            </button>
+                          ) : null}
+                        </div>
                         <div className="solution-segmented-control" aria-label="Solution options">
                           {project.solutions.map((solution, index) => (
                             <button
@@ -2177,6 +2371,7 @@ function App() {
                       previewLoading={previewLoading}
                       showChanges={false}
                       departmentFilter={scheduleDepartmentFilter}
+                      examSearchQuery={scheduleExamSearchQuery}
                       activeConflict={activeConflict}
                       onSelectExam={(exam) => {
                         setSelectedScheduleExamKey(getExamMoveKey(selectedScheduleSolution.solution_id, exam.course_code, exam.moed_number));
@@ -2194,6 +2389,7 @@ function App() {
                       onExamUnlock={(exam) => unlockExamFromCalendar(exam)}
                       onExamEditDate={(exam) => editExamDateFromCalendar(exam)}
                       isExamLocked={(exam) => isExamLocked(exam)}
+                      isExamFixed={(exam) => isExamFixed(exam)}
                       onDropExam={(exam, targetDate) => {
                         if (targetDate === exam.exam_date) {
                           return;
@@ -2205,6 +2401,150 @@ function App() {
                 ) : null}
               </CardContent>
             </Card>
+          ) : null}
+
+          {scheduleCourseEditor ? (
+            <div className="fixed inset-0 z-[70] flex items-center justify-center bg-slate-900/35 p-4" onClick={() => setScheduleCourseEditor(null)}>
+              <Card className="w-full max-w-2xl border-slate-300 shadow-2xl" onClick={(event) => event.stopPropagation()}>
+                <CardHeader className="flex flex-row items-start justify-between gap-3 pb-3">
+                  <div>
+                    <CardTitle className="text-base">Edit Course Details</CardTitle>
+                    <CardDescription className="text-xs">
+                      Update the selected course without leaving the calendar.
+                    </CardDescription>
+                  </div>
+                  <Button type="button" variant="ghost" size="icon" onClick={() => setScheduleCourseEditor(null)}>
+                    <X className="h-4 w-4" />
+                  </Button>
+                </CardHeader>
+                <CardContent className="space-y-4">
+                  <Form className="grid gap-3 md:grid-cols-2">
+                    <FormField>
+                      <FormItem>
+                        <Label>Course Code</Label>
+                        <Input
+                          value={scheduleCourseEditor.draft.course_code}
+                          onChange={(event) =>
+                            setScheduleCourseEditor((current) =>
+                              current
+                                ? { ...current, draft: { ...current.draft, course_code: event.target.value } }
+                                : current,
+                            )
+                          }
+                        />
+                      </FormItem>
+                    </FormField>
+                    <FormField>
+                      <FormItem>
+                        <Label>Course Name</Label>
+                        <Input
+                          value={scheduleCourseEditor.draft.course_name}
+                          onChange={(event) =>
+                            setScheduleCourseEditor((current) =>
+                              current
+                                ? { ...current, draft: { ...current.draft, course_name: event.target.value } }
+                                : current,
+                            )
+                          }
+                        />
+                      </FormItem>
+                    </FormField>
+                    <FormField>
+                      <FormItem>
+                        <Label>Semester</Label>
+                        <Input
+                          type="number"
+                          min={1}
+                          max={8}
+                          value={scheduleCourseEditor.draft.semester_number}
+                          onChange={(event) =>
+                            setScheduleCourseEditor((current) =>
+                              current
+                                ? {
+                                    ...current,
+                                    draft: {
+                                      ...current.draft,
+                                      semester_number: parseBoundedInteger(event.target.value, 1, 8, current.draft.semester_number),
+                                    },
+                                  }
+                                : current,
+                            )
+                          }
+                        />
+                      </FormItem>
+                    </FormField>
+                    <FormField>
+                      <FormItem>
+                        <Label>Department</Label>
+                        <SingleSelectCombobox
+                          value={scheduleCourseEditor.draft.department}
+                          placeholder="All departments"
+                          options={[
+                            { label: "All departments", value: null },
+                            { label: "SW", value: "SW" },
+                            { label: "IS", value: "IS" },
+                          ]}
+                          onChange={(next) =>
+                            setScheduleCourseEditor((current) =>
+                              current
+                                ? { ...current, draft: { ...current.draft, department: next } }
+                                : current,
+                            )
+                          }
+                        />
+                      </FormItem>
+                    </FormField>
+                    <FormField className="md:col-span-2">
+                      <FormItem>
+                        <Label>Prerequisite Course Codes</Label>
+                        <MultiSelectCombobox
+                          options={allCourseCodes}
+                          values={scheduleCourseEditor.draft.prerequisite_course_codes}
+                          placeholder="Select prerequisites"
+                          onChange={(nextValues) =>
+                            setScheduleCourseEditor((current) =>
+                              current
+                                ? { ...current, draft: { ...current.draft, prerequisite_course_codes: nextValues } }
+                                : current,
+                            )
+                          }
+                        />
+                      </FormItem>
+                    </FormField>
+                    <FormField className="md:col-span-2">
+                      <FormItem>
+                        <Label>High Failure</Label>
+                        <Button
+                          type="button"
+                          variant={scheduleCourseEditor.draft.high_failure_rate ? "destructive" : "secondary"}
+                          onClick={() =>
+                            setScheduleCourseEditor((current) =>
+                              current
+                                ? {
+                                    ...current,
+                                    draft: { ...current.draft, high_failure_rate: !current.draft.high_failure_rate },
+                                  }
+                                : current,
+                            )
+                          }
+                          className="w-full md:w-40"
+                        >
+                          {scheduleCourseEditor.draft.high_failure_rate ? "Yes" : "No"}
+                        </Button>
+                      </FormItem>
+                    </FormField>
+                  </Form>
+                  <div className="flex justify-end gap-2 border-t border-slate-200 pt-3">
+                    <Button type="button" variant="outline" onClick={() => setScheduleCourseEditor(null)}>
+                      Cancel
+                    </Button>
+                    <Button type="button" onClick={saveScheduleCourseEditor}>
+                      Save Changes
+                    </Button>
+                  </div>
+                </CardContent>
+              </Card>
+            </div>
           ) : null}
 
           <div
@@ -2252,7 +2592,10 @@ function App() {
                   {busyAction === "solve" ? "Optimizing..." : "Optimize"}
                 </Button>
                 <Button type="button" variant="secondary" onClick={() => void handleSaveSelectedSolutionToDatabase()} disabled={busyAction !== null}>
-                  Save Solution To Database
+                  Save Solution
+                </Button>
+                <Button type="button" variant="secondary" onClick={handleExportSelectedSolution} disabled={busyAction !== null}>
+                  Export
                 </Button>
               </>
             )}

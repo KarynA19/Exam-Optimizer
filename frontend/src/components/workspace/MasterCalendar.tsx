@@ -30,6 +30,7 @@ export function MasterCalendar({
   showChanges,
   departmentFilter,
   activeConflict,
+  examSearchQuery,
   onSelectExam,
   onClearSelectedExam,
   onSelectPreviewDate,
@@ -41,12 +42,14 @@ export function MasterCalendar({
   onExamUnlock,
   onExamEditDate,
   isExamLocked,
+  isExamFixed,
 }: {
   project: ScheduleProject;
   solution: ScheduleSolution;
   calendarDays: string[];
   selectedMoedNumber: number;
   semesterRows: number[];
+  examSearchQuery: string;
   courseNameByCode: Record<string, string>;
   courseByCode: Record<string, CourseInput>;
   selectedExam: ScheduledExam | null;
@@ -67,10 +70,13 @@ export function MasterCalendar({
   onExamUnlock: (exam: ScheduledExam) => void;
   onExamEditDate: (exam: ScheduledExam) => void;
   isExamLocked: (exam: ScheduledExam) => boolean;
+  isExamFixed: (exam: ScheduledExam) => boolean;
 }) {
   const examRefs = useRef<Record<string, HTMLButtonElement | null>>({});
   const [contextMenu, setContextMenu] = useState<{ exam: ScheduledExam; x: number; y: number } | null>(null);
   const visibleExams = solution.exams.filter((exam) => exam.moed_number === selectedMoedNumber);
+  const normalizedSearchQuery = examSearchQuery.trim().toLowerCase();
+  const hasSearchQuery = normalizedSearchQuery.length > 0;
   const issueByExamKey = useMemo(() => {
     const severityRank = { warning: 1, error: 2 } as const;
     const issueMap = new Map<string, ValidationIssue>();
@@ -340,10 +346,12 @@ export function MasterCalendar({
                 );
                 const changed = showChanges && hasExamChanged(solution, exam.course_code, exam.moed_number);
                 const locked = isExamLocked(exam);
-                const constrained = locked;
+                const fixedExam = isExamFixed(exam);
+                const constrained = locked || fixedExam;
                 const course = courseByCode[exam.course_code];
                 const courseName = courseNameByCode[exam.course_code] ?? exam.course_code;
                 const departmentMatchesFilter = matchesDepartmentFilter(course, departmentFilter);
+                const examMatchesSearch = matchesExamSearch(exam, normalizedSearchQuery, courseNameByCode);
 
                 return (
                   <div key={`${exam.course_code}-${exam.moed_number}-${exam.exam_date}`} className="calendar-event-stack">
@@ -358,8 +366,9 @@ export function MasterCalendar({
                         selected ? "selected" : "",
                         conflictFocused ? "conflict-focused" : "",
                         changed ? "changed" : "",
-                        constrained ? "fixed" : "",
-                        departmentFilter !== "all" && !departmentMatchesFilter ? "filtered-out" : "",
+                        fixedExam ? "fixed-source" : "",
+                        hasSearchQuery && examMatchesSearch ? "search-match" : "",
+                        (departmentFilter !== "all" && !departmentMatchesFilter) || !examMatchesSearch ? "filtered-out" : "",
                       ].filter(Boolean).join(" ")}
                       onClick={(event) => {
                         if (!interactionsEnabled) {
@@ -370,6 +379,9 @@ export function MasterCalendar({
                       }}
                       onDoubleClick={(event) => {
                         if (!interactionsEnabled) {
+                          return;
+                        }
+                        if (fixedExam) {
                           return;
                         }
                         event.stopPropagation();
@@ -387,9 +399,9 @@ export function MasterCalendar({
                         event.stopPropagation();
                         setContextMenu({ exam, x: event.clientX, y: event.clientY });
                       }}
-                      draggable={interactionsEnabled}
+                      draggable={interactionsEnabled && !locked}
                       onDragStart={(event) => {
-                        if (!interactionsEnabled) {
+                        if (!interactionsEnabled || locked) {
                           return;
                         }
                         event.dataTransfer.setData("text/plain", `${exam.course_code}|${exam.moed_number}|${exam.exam_date}`);
@@ -398,7 +410,7 @@ export function MasterCalendar({
                       title={getDepartmentLabel(course)}
                     >
                       <span className="exam-chip-indicators">
-                        {constrained ? <Lock className="exam-chip-lock" aria-hidden="true" /> : null}
+                        {locked ? <Lock className="exam-chip-lock" aria-hidden="true" /> : null}
                         {examIssue ? (
                           <span
                             className={examIssue.severity === "error" ? "calendar-conflict-dot severity-error" : "calendar-conflict-dot severity-warning"}
@@ -431,12 +443,24 @@ export function MasterCalendar({
                       const currentExam = solution.exams.find(
                         (exam) => exam.course_code === originalExam.course_code && exam.moed_number === originalExam.moed_number,
                       );
-                      return currentExam?.exam_date !== originalExam.exam_date;
+                      if (currentExam?.exam_date === originalExam.exam_date) {
+                        return false;
+                      }
+                      return true;
                     })
                     .map((originalExam) => {
                       const originalCourse = courseByCode[originalExam.course_code];
+                      const originalExamMatchesSearch = matchesExamSearch(originalExam, normalizedSearchQuery, courseNameByCode);
                       return (
-                        <div key={`original-${originalExam.course_code}-${originalExam.moed_number}-${originalExam.exam_date}`} className="exam-chip original-slot-marker">
+                        <div
+                          key={`original-${originalExam.course_code}-${originalExam.moed_number}-${originalExam.exam_date}`}
+                          className={[
+                            "exam-chip",
+                            "original-slot-marker",
+                            hasSearchQuery && originalExamMatchesSearch ? "search-match" : "",
+                            originalExamMatchesSearch ? "" : "filtered-out",
+                          ].filter(Boolean).join(" ")}
+                        >
                           <strong>{`${originalExam.course_code} original`}</strong>
                           <span className="exam-chip-meta">
                             <span className={["department-badge", getDepartmentClassName(originalCourse)].join(" ")}>{getDepartmentShortLabel(originalCourse)}</span>
@@ -466,7 +490,9 @@ export function MasterCalendar({
         <div className="calendar-context-menu" style={{ left: contextMenu.x, top: contextMenu.y }}>
           <button type="button" onClick={() => onExamDoubleClick(contextMenu.exam)}>Edit course details</button>
           <button type="button" onClick={() => onExamEditDate(contextMenu.exam)}>Edit exam date</button>
-          {isExamLocked(contextMenu.exam) ? (
+          {isExamFixed(contextMenu.exam) ? (
+            <button type="button" disabled>Fixed exam</button>
+          ) : isExamLocked(contextMenu.exam) ? (
             <button type="button" onClick={() => onExamUnlock(contextMenu.exam)}>Unlock exam</button>
           ) : (
             <button type="button" onClick={() => onExamLock(contextMenu.exam)}>Lock exam</button>
@@ -475,6 +501,20 @@ export function MasterCalendar({
       ) : null}
     </div>
   );
+}
+
+function matchesExamSearch(
+  exam: { course_code: string },
+  normalizedSearchQuery: string,
+  courseNameByCode: Record<string, string>,
+): boolean {
+  if (!normalizedSearchQuery) {
+    return true;
+  }
+
+  const courseCode = exam.course_code.toLowerCase();
+  const courseName = (courseNameByCode[exam.course_code] ?? "").toLowerCase();
+  return courseCode.includes(normalizedSearchQuery) || courseName.includes(normalizedSearchQuery);
 }
 
 
