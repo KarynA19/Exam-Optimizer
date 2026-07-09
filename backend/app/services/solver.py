@@ -14,13 +14,13 @@ from ortools.sat.python import cp_model
 
 from app.models.schedule import MoedWindow, ScheduledExam, ScheduleSolution, SolutionDiagnostics, SolveRequest, ValidationIssue
 from app.services.validation import (
-    ADJACENT_SEMESTER_NON_PREREQ_SAME_DAY_PENALTY,
-    ADJACENT_SAME_DAY_PAIR_EXCESS_PENALTY,
     DEPARTMENTS,
     EARLY_EXAM_WEIGHT,
     FRIDAY_EXAM_PENALTY,
     IDEAL_GAP_DEVIATION_WEIGHT,
     MAX_RECOMMENDED_GAP_DAYS,
+    SAME_DAY_SEMESTER_GAP1_BONUS,
+    SAME_DAY_SEMESTER_GAP2_BONUS,
     SAME_PARITY_SAME_DAY_PENALTY,
     SEMESTER_START_AFTER_WEEK_ONE_PENALTY,
     SEMESTER_START_SPREAD_PENALTY,
@@ -31,6 +31,7 @@ from app.services.validation import (
     SAME_SEMESTER_GAP_WEIGHT,
     build_solution_diagnostics,
     course_departments,
+    courses_share_department,
     date_is_friday,
     ideal_gap_target_days,
     iter_allowed_dates,
@@ -38,7 +39,6 @@ from app.services.validation import (
     pair_requires_high_failure_gap,
     pair_requires_prerequisite_gap,
     pair_requires_same_semester_gap,
-    pair_prefers_adjacent_semester_spacing,
     score_solution,
     validate_solution_exams,
 )
@@ -54,7 +54,19 @@ def minimum_date_distance_for_free_days(minimum_free_days: int) -> int:
     return minimum_free_days + 1
 
 
-def solve_single_moed_project(project, moed_window: MoedWindow, max_solutions: int) -> tuple[list[ScheduleSolution], list[ValidationIssue]]:
+def assignment_signature(assignments: dict[str, int]) -> tuple[tuple[str, int], ...]:
+    return tuple(sorted(assignments.items()))
+
+
+def solve_single_moed_project(
+    project,
+    moed_window: MoedWindow,
+    max_solutions: int,
+    base_solution_time_seconds: int,
+    variant_solution_time_seconds: int,
+    diversity_mode: str,
+    variant_min_changed_exams: int | None,
+) -> tuple[list[ScheduleSolution], list[ValidationIssue]]:
     candidate_dates = iter_allowed_dates(project)
     if not candidate_dates:
         return [], [
@@ -79,8 +91,8 @@ def solve_single_moed_project(project, moed_window: MoedWindow, max_solutions: i
     model = cp_model.CpModel()
     exam_vars: dict[str, cp_model.IntVar] = {}
     objective_terms: list[cp_model.LinearExpr] = []
-    adjacent_semester_same_day_vars: list[cp_model.BoolVar] = []
-    adjacent_semester_non_prereq_same_day_vars: list[cp_model.BoolVar] = []
+    same_day_semester_gap2_vars: list[cp_model.BoolVar] = []
+    same_day_semester_gap1_vars: list[cp_model.BoolVar] = []
     same_parity_same_day_vars: list[cp_model.BoolVar] = []
     friday_exam_vars: dict[str, cp_model.BoolVar] = {}
     scheduled_on_date_vars: dict[tuple[str, int], cp_model.BoolVar] = {}
@@ -179,13 +191,25 @@ def solve_single_moed_project(project, moed_window: MoedWindow, max_solutions: i
             if window_gap > 0:
                 model.Add(gap_var >= minimum_date_distance_for_free_days(window_gap))
 
-            if pair_prefers_adjacent_semester_spacing(course, other_course):
-                same_day_var = model.NewBoolVar(f"same_day_{course.course_code}_{other_course.course_code}")
-                model.Add(exam_vars[course.course_code] == exam_vars[other_course.course_code]).OnlyEnforceIf(same_day_var)
-                model.Add(exam_vars[course.course_code] != exam_vars[other_course.course_code]).OnlyEnforceIf(same_day_var.Not())
-                adjacent_semester_same_day_vars.append(same_day_var)
-                if not pair_requires_prerequisite_gap(course, other_course):
-                    adjacent_semester_non_prereq_same_day_vars.append(same_day_var)
+            if courses_share_department(course, other_course):
+                semester_distance = abs(course.semester_number - other_course.semester_number)
+                semester_gap = max(0, semester_distance - 1)
+                if semester_gap == 0:
+                    intentional_override = (
+                        pair_requires_same_semester_gap(course, other_course) and moed_window.same_semester_gap_days == 0
+                    ) or (
+                        pair_requires_prerequisite_gap(course, other_course) and moed_window.prerequisite_gap_days == 0
+                    )
+                    if not intentional_override:
+                        model.Add(exam_vars[course.course_code] != exam_vars[other_course.course_code])
+                elif semester_gap in {1, 2}:
+                    same_day_var = model.NewBoolVar(f"same_day_semester_pref_{course.course_code}_{other_course.course_code}")
+                    model.Add(exam_vars[course.course_code] == exam_vars[other_course.course_code]).OnlyEnforceIf(same_day_var)
+                    model.Add(exam_vars[course.course_code] != exam_vars[other_course.course_code]).OnlyEnforceIf(same_day_var.Not())
+                    if semester_gap == 2:
+                        same_day_semester_gap2_vars.append(same_day_var)
+                    else:
+                        same_day_semester_gap1_vars.append(same_day_var)
 
             if course.semester_number != other_course.semester_number and course.semester_number % 2 == other_course.semester_number % 2:
                 same_parity_same_day_var = model.NewBoolVar(f"same_parity_same_day_{course.course_code}_{other_course.course_code}")
@@ -275,16 +299,10 @@ def solve_single_moed_project(project, moed_window: MoedWindow, max_solutions: i
     if friday_exam_vars:
         objective_terms.append(-FRIDAY_EXAM_PENALTY * sum(friday_exam_vars.values()))
     objective_terms.extend(-EARLY_EXAM_WEIGHT * (exam_vars[course.course_code] - min_ordinal) for course in courses)
-    if adjacent_semester_non_prereq_same_day_vars:
-        objective_terms.append(-ADJACENT_SEMESTER_NON_PREREQ_SAME_DAY_PENALTY * sum(adjacent_semester_non_prereq_same_day_vars))
-    if len(adjacent_semester_same_day_vars) > 1:
-        adjacent_same_day_excess_var = model.NewIntVar(
-            0,
-            len(adjacent_semester_same_day_vars) - 1,
-            "adjacent_same_day_pair_excess",
-        )
-        model.Add(adjacent_same_day_excess_var >= sum(adjacent_semester_same_day_vars) - 1)
-        objective_terms.append(-ADJACENT_SAME_DAY_PAIR_EXCESS_PENALTY * adjacent_same_day_excess_var)
+    if same_day_semester_gap2_vars:
+        objective_terms.append(SAME_DAY_SEMESTER_GAP2_BONUS * sum(same_day_semester_gap2_vars))
+    if same_day_semester_gap1_vars:
+        objective_terms.append(SAME_DAY_SEMESTER_GAP1_BONUS * sum(same_day_semester_gap1_vars))
     if same_parity_same_day_vars:
         objective_terms.append(-SAME_PARITY_SAME_DAY_PENALTY * sum(same_parity_same_day_vars))
     if cumulative_gap_deviation_vars:
@@ -293,43 +311,105 @@ def solve_single_moed_project(project, moed_window: MoedWindow, max_solutions: i
         model.Maximize(sum(objective_terms))
 
     solver = cp_model.CpSolver()
-    solver.parameters.max_time_in_seconds = 10
-
     solutions: list[ScheduleSolution] = []
+    seen_assignment_signatures: set[tuple[tuple[str, int], ...]] = set()
 
-    for solution_index in range(max_solutions):
-        status = solver.Solve(model)
-        if status not in (cp_model.OPTIMAL, cp_model.FEASIBLE):
-            break
+    if max_solutions <= 0:
+        return [], []
 
-        exams = [
+    solver.parameters.max_time_in_seconds = base_solution_time_seconds
+    base_status = solver.Solve(model)
+    if base_status in (cp_model.OPTIMAL, cp_model.FEASIBLE):
+        base_assignments = {course.course_code: solver.Value(exam_vars[course.course_code]) for course in courses}
+        base_exams = [
             ScheduledExam(
                 course_code=course.course_code,
                 moed_number=moed_window.moed_number,
-                exam_date=ordinal_to_date[solver.Value(exam_vars[course.course_code])],
+                exam_date=ordinal_to_date[base_assignments[course.course_code]],
                 source="fixed" if course.course_code in fixed_exam_lookup else "solver",
             )
             for course in courses
         ]
-        issues = validate_solution_exams(project, exams)
+        base_issues = validate_solution_exams(project, base_exams)
         solutions.append(
             ScheduleSolution(
-                solution_id=f"moed-{moed_window.moed_number}-solution-{solution_index + 1}",
-                score=score_solution(project, exams),
-                exams=sorted(exams, key=lambda exam: (exam.exam_date, exam.course_code)),
-                issues=issues,
-                diagnostics=build_solution_diagnostics(project, exams),
+                solution_id=f"moed-{moed_window.moed_number}-solution-1",
+                score=score_solution(project, base_exams),
+                exams=sorted(base_exams, key=lambda exam: (exam.exam_date, exam.course_code)),
+                issues=base_issues,
+                diagnostics=build_solution_diagnostics(project, base_exams),
             )
         )
+        seen_assignment_signatures.add(assignment_signature(base_assignments))
+    else:
+        base_assignments = {}
 
-        same_value_flags: list[cp_model.BoolVar] = []
-        for course in courses:
-            fixed_value = solver.Value(exam_vars[course.course_code])
-            same_value = model.NewBoolVar(f"same_{solution_index}_{course.course_code}")
-            model.Add(exam_vars[course.course_code] == fixed_value).OnlyEnforceIf(same_value)
-            model.Add(exam_vars[course.course_code] != fixed_value).OnlyEnforceIf(same_value.Not())
-            same_value_flags.append(same_value)
-        model.Add(sum(same_value_flags) <= len(courses) - 1)
+    variant_target_count = max(0, min(max_solutions - 1, 20))
+    if solutions and variant_target_count > 0 and courses:
+        if variant_min_changed_exams is not None:
+            base_min_changes = min(max(variant_min_changed_exams, 1), len(courses))
+        elif diversity_mode == "high_diversity":
+            base_min_changes = min(max(2, len(courses) // 3), len(courses))
+        else:
+            base_min_changes = 1
+
+        accepted_assignments: list[dict[str, int]] = [base_assignments]
+        for variant_index in range(variant_target_count):
+            required_changes = min(base_min_changes + variant_index, len(courses)) if diversity_mode == "high_diversity" else base_min_changes
+
+            same_as_base_flags: list[cp_model.BoolVar] = []
+            for course in courses:
+                course_code = course.course_code
+                same_as_base = model.NewBoolVar(f"same_as_base_{variant_index}_{course_code}")
+                model.Add(exam_vars[course_code] == base_assignments[course_code]).OnlyEnforceIf(same_as_base)
+                model.Add(exam_vars[course_code] != base_assignments[course_code]).OnlyEnforceIf(same_as_base.Not())
+                same_as_base_flags.append(same_as_base)
+            model.Add(sum(same_as_base_flags) <= len(courses) - required_changes)
+
+            for prior_index, prior_assignment in enumerate(accepted_assignments):
+                same_as_prior_flags: list[cp_model.BoolVar] = []
+                for course in courses:
+                    course_code = course.course_code
+                    same_as_prior = model.NewBoolVar(f"same_as_prior_{variant_index}_{prior_index}_{course_code}")
+                    model.Add(exam_vars[course_code] == prior_assignment[course_code]).OnlyEnforceIf(same_as_prior)
+                    model.Add(exam_vars[course_code] != prior_assignment[course_code]).OnlyEnforceIf(same_as_prior.Not())
+                    same_as_prior_flags.append(same_as_prior)
+                model.Add(sum(same_as_prior_flags) <= len(courses) - 1)
+
+            solver.parameters.max_time_in_seconds = variant_solution_time_seconds
+            status = solver.Solve(model)
+            if status not in (cp_model.OPTIMAL, cp_model.FEASIBLE):
+                break
+
+            variant_assignments = {course.course_code: solver.Value(exam_vars[course.course_code]) for course in courses}
+            variant_signature = assignment_signature(variant_assignments)
+            if variant_signature in seen_assignment_signatures:
+                continue
+
+            exams = [
+                ScheduledExam(
+                    course_code=course.course_code,
+                    moed_number=moed_window.moed_number,
+                    exam_date=ordinal_to_date[variant_assignments[course.course_code]],
+                    source="fixed" if course.course_code in fixed_exam_lookup else "solver",
+                )
+                for course in courses
+            ]
+            issues = validate_solution_exams(project, exams)
+            solutions.append(
+                ScheduleSolution(
+                    solution_id=f"moed-{moed_window.moed_number}-solution-{len(solutions) + 1}",
+                    score=score_solution(project, exams),
+                    exams=sorted(exams, key=lambda exam: (exam.exam_date, exam.course_code)),
+                    issues=issues,
+                    diagnostics=build_solution_diagnostics(project, exams),
+                )
+            )
+            accepted_assignments.append(variant_assignments)
+            seen_assignment_signatures.add(variant_signature)
+
+            if len(solutions) >= max_solutions:
+                break
 
     if solutions:
         return solutions, []
@@ -391,7 +471,15 @@ def solve_project(request: SolveRequest) -> dict:
             and fixed_window.moed_number == moed_window.moed_number
         ]
         window_project = project.model_copy(update={"moed_windows": [moed_window], "fixed_exams": window_fixed_exams})
-        window_solutions, window_issues = solve_single_moed_project(window_project, moed_window, request.max_solutions)
+        window_solutions, window_issues = solve_single_moed_project(
+            window_project,
+            moed_window,
+            request.max_solutions,
+            request.base_solution_time_seconds,
+            request.variant_solution_time_seconds,
+            request.diversity_mode,
+            request.variant_min_changed_exams,
+        )
 
         if not window_solutions:
             blocking_issues.extend(window_issues)

@@ -249,6 +249,10 @@ class ScheduleProject(BaseModel):
 class SolveRequest(BaseModel):
     project: ScheduleProject
     max_solutions: int = Field(default=5, ge=1, le=20)
+    base_solution_time_seconds: int = Field(default=30, ge=5, le=180)
+    variant_solution_time_seconds: int = Field(default=5, ge=1, le=60)
+    diversity_mode: Literal["balanced", "high_diversity"] = "high_diversity"
+    variant_min_changed_exams: int | None = Field(default=None, ge=1, le=20)
 
 
 class ManualMoveRequest(BaseModel):

@@ -326,7 +326,7 @@ function MultiSelectCombobox({
             <ChevronsUpDown className="h-4 w-4 opacity-60" />
           </Button>
         </PopoverTrigger>
-        <PopoverContent className="w-[var(--radix-popover-trigger-width)] p-0">
+        <PopoverContent className="z-[90] w-[var(--radix-popover-trigger-width)] p-0">
           <Command>
             <CommandInput placeholder="Search course code..." />
             <CommandList>
@@ -395,7 +395,7 @@ function SingleSelectCombobox({
           <ChevronsUpDown className="h-4 w-4 opacity-60" />
         </Button>
       </PopoverTrigger>
-      <PopoverContent className="w-[var(--radix-popover-trigger-width)] p-0">
+      <PopoverContent className="z-[90] w-[var(--radix-popover-trigger-width)] p-0">
         <Command>
           <CommandInput placeholder="Filter department..." />
           <CommandList>
@@ -1494,27 +1494,115 @@ function App() {
     }
 
     const nextDraft = scheduleCourseEditor.draft;
-    if (!nextDraft.course_code.trim() || !nextDraft.course_name.trim()) {
+    const nextCourseCode = nextDraft.course_code.trim();
+    const nextCourseName = nextDraft.course_name.trim();
+
+    if (!nextCourseCode || !nextCourseName) {
       setActionStatus("Course code and course name are required.");
       return;
     }
 
-    if (scheduleCourseEditor.editingCourseIndex === null) {
-      patchProject({
-        courses: [
-          ...project.courses,
-          { ...nextDraft, course_code: nextDraft.course_code.trim(), course_name: nextDraft.course_name.trim() },
-        ],
+    const normalizedDraft: CourseInput = {
+      ...nextDraft,
+      course_code: nextCourseCode,
+      course_name: nextCourseName,
+    };
+
+    const editedCourse =
+      scheduleCourseEditor.editingCourseIndex === null
+        ? null
+        : project.courses[scheduleCourseEditor.editingCourseIndex] ?? null;
+    const previousCourseCode = editedCourse?.course_code ?? null;
+    const courseCodeChanged = previousCourseCode !== null && previousCourseCode !== normalizedDraft.course_code;
+
+    setProject((current) => {
+      const nextCourses =
+        scheduleCourseEditor.editingCourseIndex === null
+          ? [...current.courses, normalizedDraft]
+          : current.courses.map((course, index) =>
+              index === scheduleCourseEditor.editingCourseIndex ? normalizedDraft : course,
+            );
+
+      if (!previousCourseCode || !courseCodeChanged) {
+        return {
+          ...current,
+          courses: nextCourses,
+          fixed_exams: current.fixed_exams.map((fixedExam) =>
+            fixedExam.course_code === normalizedDraft.course_code
+              ? {
+                  ...fixedExam,
+                  course_name: normalizedDraft.course_name,
+                  semester_number: normalizedDraft.semester_number,
+                  department: normalizedDraft.department,
+                  prerequisite_course_codes: normalizedDraft.prerequisite_course_codes,
+                }
+              : fixedExam,
+          ),
+        };
+      }
+
+      const updatedCourses = nextCourses.map((course) => ({
+        ...course,
+        prerequisite_course_codes: course.prerequisite_course_codes.map((code) => (code === previousCourseCode ? normalizedDraft.course_code : code)),
+      }));
+
+      const updatedFixedExams = current.fixed_exams.map((fixedExam) => {
+        const remappedPrerequisites = fixedExam.prerequisite_course_codes.map((code) => (code === previousCourseCode ? normalizedDraft.course_code : code));
+        if (fixedExam.course_code === previousCourseCode) {
+          return {
+            ...fixedExam,
+            course_code: normalizedDraft.course_code,
+            course_name: normalizedDraft.course_name,
+            semester_number: normalizedDraft.semester_number,
+            department: normalizedDraft.department,
+            prerequisite_course_codes: remappedPrerequisites,
+          };
+        }
+        return {
+          ...fixedExam,
+          prerequisite_course_codes: remappedPrerequisites,
+        };
       });
-    } else {
-      patchProject({
-        courses: project.courses.map((course, index) =>
-          index === scheduleCourseEditor.editingCourseIndex
-            ? { ...nextDraft, course_code: nextDraft.course_code.trim(), course_name: nextDraft.course_name.trim() }
-            : course,
+
+      const remapCourseCode = (courseCode: string) => (courseCode === previousCourseCode ? normalizedDraft.course_code : courseCode);
+      const updatedSolutions = current.solutions.map((solution) => ({
+        ...solution,
+        exams: solution.exams.map((exam) => ({ ...exam, course_code: remapCourseCode(exam.course_code) })),
+        original_exams: solution.original_exams?.map((exam) => ({ ...exam, course_code: remapCourseCode(exam.course_code) })),
+        issues: solution.issues.map((issue) =>
+          issue.related_course_code === previousCourseCode
+            ? { ...issue, related_course_code: normalizedDraft.course_code }
+            : issue,
         ),
+      }));
+
+      return {
+        ...current,
+        courses: updatedCourses,
+        fixed_exams: updatedFixedExams,
+        solutions: updatedSolutions,
+        issues: current.issues.map((issue) =>
+          issue.related_course_code === previousCourseCode
+            ? { ...issue, related_course_code: normalizedDraft.course_code }
+            : issue,
+        ),
+      };
+    });
+
+    if (courseCodeChanged) {
+      setSolutionLocksBySolutionId((current) => {
+        const nextLocks: Record<string, string[]> = {};
+        for (const [solutionId, lockKeys] of Object.entries(current)) {
+          nextLocks[solutionId] = lockKeys.map((lockKey) => {
+            const [courseCode, moedNumber] = lockKey.split("|");
+            return courseCode === previousCourseCode ? `${normalizedDraft.course_code}|${moedNumber ?? ""}` : lockKey;
+          });
+        }
+        return nextLocks;
       });
     }
+
+    setSetupStatus("Setup changes saved locally.");
 
     setScheduleCourseEditor(null);
     setActionStatus("Course details updated from calendar.");

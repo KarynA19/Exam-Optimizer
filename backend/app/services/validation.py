@@ -7,8 +7,9 @@ from app.models.schedule import CourseInput, DepartmentCode, ManualMoveRequest, 
 
 FRIDAY_EXAM_PENALTY = 100
 SAME_SEMESTER_GAP_WEIGHT = 10
-ADJACENT_SEMESTER_NON_PREREQ_SAME_DAY_PENALTY = 200
-ADJACENT_SAME_DAY_PAIR_EXCESS_PENALTY = 240
+SAME_DAY_SEMESTER_GAP2_BONUS = 220
+SAME_DAY_SEMESTER_GAP1_BONUS = 90
+SAME_DAY_SEMESTER_GAP0_HEAVY_PENALTY = 900
 IDEAL_GAP_DEVIATION_WEIGHT = 40
 SAME_SEMESTER_OVER_WEEK_PENALTY = 70
 EARLY_EXAM_WEIGHT = 5
@@ -126,6 +127,26 @@ def pair_prefers_adjacent_semester_spacing(first_course: CourseInput, second_cou
         first_course,
         second_course,
     )
+
+
+def same_day_pair_is_intentional_prerequisite_override(
+    project: ScheduleProject,
+    first_course: CourseInput,
+    first_date: date,
+    second_course: CourseInput,
+    second_date: date,
+) -> bool:
+    if first_date != second_date:
+        return False
+    if not pair_requires_prerequisite_gap(first_course, second_course):
+        return False
+
+    first_window = moed_window_for_date(project, first_date)
+    second_window = moed_window_for_date(project, second_date)
+    if first_window is None or second_window is None or first_window.moed_number != second_window.moed_number:
+        return False
+
+    return first_window.prerequisite_gap_days == 0
 
 
 def pair_requires_adjacent_semester_gap(first_course: CourseInput, second_course: CourseInput) -> bool:
@@ -257,8 +278,6 @@ def score_solution(project: ScheduleProject, exams: list[ScheduledExam]) -> int:
         latest_start = max(semester_start_dates)
         total_score -= gap_days(earliest_start, latest_start) * SEMESTER_START_SPREAD_PENALTY
 
-    adjacent_same_day_pair_count = 0
-
     for index, exam in enumerate(exams):
         course = course_lookup.get(exam.course_code)
         if course is None:
@@ -281,10 +300,22 @@ def score_solution(project: ScheduleProject, exams: list[ScheduledExam]) -> int:
             elif in_same_window and pair_requires_high_failure_gap(course, other_course):
                 total_score += distance * ((current_window.high_failure_gap_days if in_same_window and current_window else 1) + 1)
 
-            if pair_prefers_adjacent_semester_spacing(course, other_course) and distance == 0:
-                adjacent_same_day_pair_count += 1
-                if not pair_requires_prerequisite_gap(course, other_course):
-                    total_score -= ADJACENT_SEMESTER_NON_PREREQ_SAME_DAY_PENALTY
+            if distance == 0 and courses_share_department(course, other_course):
+                semester_distance = abs(course.semester_number - other_course.semester_number)
+                semester_gap = max(0, semester_distance - 1)
+
+                if semester_gap == 2:
+                    total_score += SAME_DAY_SEMESTER_GAP2_BONUS
+                elif semester_gap == 1:
+                    total_score += SAME_DAY_SEMESTER_GAP1_BONUS
+                elif semester_gap == 0 and not same_day_pair_is_intentional_prerequisite_override(
+                    project,
+                    course,
+                    exam.exam_date,
+                    other_course,
+                    other_exam.exam_date,
+                ):
+                    total_score -= SAME_DAY_SEMESTER_GAP0_HEAVY_PENALTY
 
             if (
                 course.semester_number != other_course.semester_number
@@ -292,8 +323,6 @@ def score_solution(project: ScheduleProject, exams: list[ScheduledExam]) -> int:
                 and distance == 0
             ):
                 total_score -= SAME_PARITY_SAME_DAY_PENALTY
-
-    total_score -= max(0, adjacent_same_day_pair_count - 1) * ADJACENT_SAME_DAY_PAIR_EXCESS_PENALTY
 
     return total_score
 
@@ -340,6 +369,33 @@ def pair_constraint_issues(
     other_window = moed_window_for_date(project, other_date)
     if moved_window is None or other_window is None or moved_window.moed_number != other_window.moed_number:
         return issues
+
+    semester_distance = abs(moved_course.semester_number - other_course.semester_number)
+    semester_gap = max(0, semester_distance - 1)
+    if (
+        moved_date == other_date
+        and courses_share_department(moved_course, other_course)
+        and semester_gap == 0
+        and not same_day_pair_is_intentional_prerequisite_override(
+            project,
+            moved_course,
+            moved_date,
+            other_course,
+            other_date,
+        )
+    ):
+        issues.append(
+            ValidationIssue(
+                code="unsatisfied_constraint",
+                severity="error",
+                message=(
+                    "Adjacent semesters cannot share the same exam date unless they are prerequisite-linked "
+                    "and the Moed prerequisite gap is configured as 0."
+                ),
+                related_course_code=other_course.course_code,
+                related_date=other_date,
+            )
+        )
 
     same_semester_gap = moved_window.same_semester_gap_days
     prerequisite_gap = moved_window.prerequisite_gap_days

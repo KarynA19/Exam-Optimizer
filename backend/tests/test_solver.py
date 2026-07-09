@@ -42,6 +42,59 @@ def test_solve_project_returns_solutions_for_feasible_input() -> None:
     assert {exam["course_code"] for exam in result["solutions"][0]["exams"]} == {"ALG1", "CALC1", "ALG2"}
 
 
+def test_solve_project_generates_variants_that_differ_from_base_solution() -> None:
+    project = ScheduleProject(
+        project_name="Variant diversity",
+        moed_a_window=DateRange(start_date="2026-06-01", end_date="2026-06-20"),
+        courses=[
+            CourseInput(course_code="S1A", course_name="Semester 1 A", semester_number=1),
+            CourseInput(course_code="S1B", course_name="Semester 1 B", semester_number=1),
+            CourseInput(course_code="S2A", course_name="Semester 2 A", semester_number=2),
+            CourseInput(course_code="S3A", course_name="Semester 3 A", semester_number=3),
+            CourseInput(course_code="S4A", course_name="Semester 4 A", semester_number=4),
+            CourseInput(course_code="S5A", course_name="Semester 5 A", semester_number=5),
+        ],
+    )
+
+    result = solve_project(SolveRequest(project=project, max_solutions=5))
+
+    assert result["issues"] == []
+    assert len(result["solutions"]) >= 2
+
+    base_dates = {exam["course_code"]: exam["exam_date"] for exam in result["solutions"][0]["exams"]}
+    for variant in result["solutions"][1:]:
+        changed_course_count = sum(
+            1 for exam in variant["exams"] if base_dates[exam["course_code"]] != exam["exam_date"]
+        )
+        assert changed_course_count >= 1
+
+
+def test_solve_project_accepts_custom_variant_strategy_timing() -> None:
+    project = ScheduleProject(
+        project_name="Custom timing",
+        moed_a_window=DateRange(start_date="2026-06-01", end_date="2026-06-12"),
+        courses=[
+            CourseInput(course_code="ALG1", course_name="Algebra 1", semester_number=1),
+            CourseInput(course_code="ALG2", course_name="Algebra 2", semester_number=2),
+            CourseInput(course_code="ALG3", course_name="Algebra 3", semester_number=3),
+        ],
+    )
+
+    result = solve_project(
+        SolveRequest(
+            project=project,
+            max_solutions=4,
+            base_solution_time_seconds=20,
+            variant_solution_time_seconds=3,
+            diversity_mode="balanced",
+            variant_min_changed_exams=1,
+        )
+    )
+
+    assert result["issues"] == []
+    assert len(result["solutions"]) >= 1
+
+
 def test_pair_requires_prerequisite_gap_supports_multiple_prerequisites() -> None:
     dependent_course = CourseInput(
         course_code="ALG3",
